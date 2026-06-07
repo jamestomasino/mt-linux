@@ -1,0 +1,17 @@
+[Unit]
+Description=Meeting Transcriber (Linux)
+Documentation=https://github.com/example/mt-linux
+After=graphical-session.target pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mt-linux
+Restart=on-failure
+RestartSec=5s
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mt-linux
+
+[Install]
+WantedBy=graphical-session.target

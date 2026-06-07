@@ -1,0 +1,44 @@
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from mt_linux.config import AppConfig
+from mt_linux.models import Attendee, CalendarEvent, MeetingInfo, SpeakerIdentity, TranscriptSegment
+from mt_linux.output.markdown import render_meeting_markdown
+from mt_linux.pipeline.job import PipelineJob
+
+
+def test_render_meeting_markdown_contains_frontmatter_and_transcript(tmp_path: Path):
+    config = AppConfig()
+    config.output.folder = str(tmp_path)
+    config.speakers.mic_speaker_name = "James Tomasino"
+    meeting_info = MeetingInfo(
+        app="zoom",
+        pid=1,
+        detection_method="import",
+        start_time=datetime(2026, 6, 7, 14, 30),
+        title="Weekly Standup",
+        calendar_event=CalendarEvent(
+            event_id="abc123",
+            title="Weekly Standup",
+            start_time=datetime(2026, 6, 7, 14, 30),
+            end_time=datetime(2026, 6, 7, 15, 0),
+            organizer="Alice Smith",
+            attendees=[Attendee(name="Alice Smith", email="alice@example.com")],
+        ),
+    )
+    job = PipelineJob(
+        session_id="session-1",
+        app_audio_path=tmp_path / "app.wav",
+        mic_audio_path=tmp_path / "mic.wav",
+        meeting_info=meeting_info,
+    )
+    rendered = render_meeting_markdown(
+        job,
+        config,
+        transcript_segments=[TranscriptSegment(start=5, end=7, text="Hello there", speaker="SPEAKER_00")],
+        identities=[SpeakerIdentity(label="SPEAKER_00", name="James Tomasino", confidence="mic_track")],
+        summary="Short summary",
+    )
+    assert 'title: "Weekly Standup"' in rendered.content
+    assert "[[James Tomasino]]" in rendered.content
+    assert "**14:30:05**" in rendered.content
