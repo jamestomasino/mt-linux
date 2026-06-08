@@ -32,7 +32,10 @@ class PyannoteDiarizer:
         if self.num_speakers:
             kwargs["num_speakers"] = self.num_speakers
         diarization = self.pipeline(str(audio_path), **kwargs)
+        annotation = getattr(diarization, "exclusive_speaker_diarization", None)
+        if annotation is None:
+            annotation = getattr(diarization, "speaker_diarization", diarization)
         return [
             DiarizationSegment(start=turn.start, end=turn.end, speaker=speaker)
-            for turn, _, speaker in diarization.itertracks(yield_label=True)
+            for turn, _, speaker in annotation.itertracks(yield_label=True)
         ]
