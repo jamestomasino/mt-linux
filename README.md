@@ -123,12 +123,21 @@ Common settings:
 
 - `output.folder`: Markdown output directory
 - `output.vault_root`: optional Obsidian vault root for relative audio paths
+- `audio.mic_device_name`: physical microphone source name to record
+- `audio.system_source_name`: optional explicit system-audio monitor source
 - `speakers.mic_speaker_name`: your display name
 - `calendar.backend`: `google`, `caldav`, or `none`
 - `calendar.lookup_window_minutes`: candidate lookup window
 - `transcription.model`: Whisper model name
 - `diarization.hf_token`: Hugging Face token for pyannote
 - `protocol.enabled`: enable or disable local LLM summary generation
+
+Audio capture behavior:
+
+- the microphone track should point at a real hardware input source, not a virtual loopback source
+- on meeting start, `mt-linux` tries to capture the meeting app's specific playback sink first
+- if app-specific sink detection fails, it falls back to the current default sink monitor so recording still succeeds
+- if `audio.system_source_name` is set, that source is used directly instead of auto-detection
 
 ## Calendar Configuration
 
@@ -182,8 +191,13 @@ mt-ctl start
 mt-ctl stop
 mt-ctl status
 mt-ctl jobs
+mt-ctl jobs list
+mt-ctl jobs cancel <session_id>
+mt-ctl jobs cancel --delete-audio <session_id>
 mt-ctl process-jobs
 mt-ctl cleanup
+mt-ctl cleanup --dry-run
+mt-ctl cleanup --include-job-history
 ```
 
 Diagnostics and setup:
@@ -275,11 +289,15 @@ Generated notes are Markdown files with YAML frontmatter intended for Obsidian. 
 
 The transcript body includes timestamped speaker turns and optional LLM-generated summary sections.
 
+Recorded app audio and mic audio are kept as separate WAV files. For transcription and diarization, `mt-linux` mixes those tracks into a temporary processing WAV so both your voice and remote participants are present in the transcript path.
+
 ## Runtime Notes
 
 - Heavy runtime integrations are imported lazily in code paths, but the intended install now includes the full local transcription/diarization/calendar stack by default.
 - Recordings, review clips, speaker profiles, and job snapshots are intentionally stored under XDG data paths, not in your transcript directory.
 - `mt-ctl doctor` is the fastest way to see what is missing on a new machine.
+- `mt-ctl jobs cancel` removes persisted queue entries; use `--delete-audio` if you also want the app/mic/mix recordings removed.
+- `mt-ctl cleanup` removes orphaned runtime artifacts. By default it only removes unreferenced WAVs and stale review samples. `--include-job-history` also removes completed and failed job snapshot files before cleaning their now-orphaned audio.
 
 ## Testing
 
