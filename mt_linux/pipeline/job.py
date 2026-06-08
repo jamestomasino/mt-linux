@@ -71,6 +71,7 @@ class PipelineJob:
             pid=int(data["meeting_info"]["pid"]),
             detection_method=data["meeting_info"]["detection_method"],
             start_time=datetime.fromisoformat(data["meeting_info"]["start_time"]),
+            stream_id=data["meeting_info"].get("stream_id"),
             bus_name=data["meeting_info"].get("bus_name"),
             title=data["meeting_info"].get("title"),
             calendar_event=calendar_event,

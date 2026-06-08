@@ -18,7 +18,6 @@ MEETING_PROCESS_NAMES = {
     "zoom": "zoom",
     "zoom.real": "zoom",
     "teams-for-linux": "teams",
-    "slack": "slack",
 }
 
 
@@ -52,24 +51,26 @@ class PipeWireActivityPoller:
             active = get_active_meeting_pid()
             transition = self._activity_state.update(active)
             if transition.started:
-                app, pid = transition.started
+                app, pid, stream_id = transition.started
                 self.callbacks.on_meeting_start(
                     MeetingInfo(
                         app=app,
                         pid=pid,
                         detection_method="pipewire",
                         start_time=datetime.now(UTC),
+                        stream_id=stream_id,
                         title=None,
                     )
                 )
             if transition.ended:
-                app, pid = transition.ended
+                app, pid, stream_id = transition.ended
                 self.callbacks.on_meeting_end(
                     MeetingInfo(
                         app=app,
                         pid=pid,
                         detection_method="pipewire",
                         start_time=datetime.now(UTC),
+                        stream_id=stream_id,
                     )
                 )
             time.sleep(self.poll_interval)
@@ -91,7 +92,7 @@ class MeetingDetector:
         self._pipewire_poller.stop()
 
 
-def get_active_meeting_pid() -> tuple[str, int] | None:
+def get_active_meeting_pid() -> tuple[str, int, int] | None:
     candidate_pids: dict[int, str] = {}
     for proc in psutil.process_iter(["name", "pid"]):
         name = proc.info.get("name")
@@ -102,20 +103,22 @@ def get_active_meeting_pid() -> tuple[str, int] | None:
             candidate_pids[int(proc.info["pid"])] = app
     if not candidate_pids:
         return None
-    result = subprocess.run(["pw-dump"], capture_output=True, text=True, check=False)
+    result = subprocess.run(["pactl", "-f", "json", "list", "sink-inputs"], capture_output=True, text=True, check=False)
     if result.returncode != 0 or not result.stdout.strip():
         return None
     try:
-        nodes = json.loads(result.stdout)
+        sink_inputs = json.loads(result.stdout)
     except json.JSONDecodeError:
         return None
-    for node in nodes:
-        props = node.get("info", {}).get("props", {})
+    for item in sink_inputs:
+        props = item.get("properties", {})
         pid = props.get("application.process.id")
-        media_class = props.get("media.class", "")
         if pid is None:
             continue
         pid_int = int(pid)
-        if pid_int in candidate_pids and "Audio" in media_class and "Stream" in media_class:
-            return candidate_pids[pid_int], pid_int
+        if item.get("corked"):
+            continue
+        if pid_int in candidate_pids:
+            stream_id = int(item.get("index"))
+            return candidate_pids[pid_int], pid_int, stream_id
     return None

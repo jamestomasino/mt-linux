@@ -34,6 +34,7 @@ class MeetingInfo:
     pid: int
     detection_method: str
     start_time: datetime
+    stream_id: int | None = None
     bus_name: str | None = None
     title: str | None = None
     calendar_event: CalendarEvent | None = None
