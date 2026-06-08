@@ -7,8 +7,10 @@ import logging
 from mt_linux.audio.factory import create_session_recorder
 from mt_linux.audio.wav import mix_wav_files, wav_duration_minutes, wav_files_identical
 from mt_linux.config import AppConfig
+from mt_linux.control import ControlResult, clear_request, read_request
 from mt_linux.detection.calendar_lookup import CalendarLookupService
 from mt_linux.detection.meeting_detector import MeetingDetector
+from mt_linux.detection.start_gate import CalendarCoupledStartGate
 from mt_linux.diarization.diarizer import DiarizationSegment, PyannoteDiarizer
 from mt_linux.diarization.speaker_matcher import SpeakerMatcher
 from mt_linux.models import TranscriptSegment
@@ -39,24 +41,36 @@ class MeetingPipeline:
         audio_path = self._processing_audio_path(job)
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file does not exist: {audio_path}")
-        transcription_segments = await asyncio.to_thread(self._transcribe, job)
-        try:
-            diarization_segments = await asyncio.to_thread(self._diarize, job)
-        except Exception:
-            logging.exception("Diarization failed for %s", job.session_id)
-            diarization_segments = []
-        transcript_segments = assign_speakers_to_transcript(transcription_segments, diarization_segments)
-        summary = await asyncio.to_thread(self._generate_protocol, job, transcript_segments)
+        if job.transcript_segments is None:
+            job.transcript_segments = await asyncio.to_thread(self._transcribe, job)
+            job.status = JobStatus.TRANSCRIBED
+            self.store.save(job)
+            return
+        if job.diarization_segments is None:
+            try:
+                job.diarization_segments = await asyncio.to_thread(self._diarize, job)
+            except Exception:
+                logging.exception("Diarization failed for %s", job.session_id)
+                job.diarization_segments = []
+            job.status = JobStatus.DIARIZED
+            self.store.save(job)
+            return
+        transcript_segments = assign_speakers_to_transcript(
+            job.transcript_segments,
+            job.diarization_segments,
+        )
+        if job.summary is None:
+            job.summary = await asyncio.to_thread(self._generate_protocol, job, transcript_segments)
         rendered = render_meeting_markdown(
             job,
             self.config,
             transcript_segments=transcript_segments,
             identities=[],
-            summary=summary,
+            summary=job.summary or "",
         )
         identities = resolve_identities(
             self.config,
-            diarization_segments,
+            job.diarization_segments,
             transcript_path=rendered.path,
             review_queue=self.review_queue,
             job=job,
@@ -68,7 +82,7 @@ class MeetingPipeline:
             self.config,
             transcript_segments=transcript_segments,
             identities=identities,
-            summary=summary,
+            summary=job.summary or "",
         )
         job.status = JobStatus.WRITING_OUTPUT
         self.store.save(job)
@@ -172,15 +186,85 @@ class MeetingPipeline:
 
 
 class DaemonState:
-    def __init__(self, queue: PipelineQueue):
+    def __init__(self, queue: PipelineQueue, session_manager: MeetingSessionManager):
         self.queue = queue
+        self.session_manager = session_manager
+        self.last_control_result: ControlResult | None = None
 
     def write(self) -> None:
         ensure_directories()
         state = self.queue.snapshot()
+        active = self.session_manager.active
+        state["active_meeting"] = (
+            {
+                "session_id": active.capture_session.session_id,
+                "title": active.meeting_info.title or active.meeting_info.app,
+                "app": active.meeting_info.app,
+                "detection_method": active.meeting_info.detection_method,
+                "start_time": active.meeting_info.start_time.isoformat(),
+            }
+            if active is not None
+            else None
+        )
+        state["last_control_result"] = (
+            self.last_control_result.to_dict() if self.last_control_result is not None else None
+        )
         tmp = STATE_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
         tmp.replace(STATE_FILE)
+
+
+async def handle_control_request(
+    session_manager: MeetingSessionManager,
+    state: DaemonState,
+) -> bool:
+    request = read_request()
+    if request is None:
+        return False
+    try:
+        if request.action == "start":
+            active = await session_manager.start_manual_recording(
+                title=request.title,
+                app=request.app or "manual",
+            )
+            if active is None:
+                state.last_control_result = ControlResult(
+                    request_id=request.request_id,
+                    status="error",
+                    message="Another recording session is already active.",
+                )
+            else:
+                state.last_control_result = ControlResult(
+                    request_id=request.request_id,
+                    status="ok",
+                    message="Manual recording started.",
+                    session_id=active.capture_session.session_id,
+                )
+        elif request.action == "stop":
+            job = await session_manager.stop_manual_recording()
+            if job is None:
+                state.last_control_result = ControlResult(
+                    request_id=request.request_id,
+                    status="error",
+                    message="No active manual recording to stop.",
+                )
+            else:
+                state.last_control_result = ControlResult(
+                    request_id=request.request_id,
+                    status="ok",
+                    message="Manual recording stopped and queued.",
+                    session_id=job.session_id,
+                )
+        else:
+            state.last_control_result = ControlResult(
+                request_id=request.request_id,
+                status="error",
+                message=f"Unknown control action: {request.action}",
+            )
+    finally:
+        clear_request()
+    state.write()
+    return True
 
 
 def handle_job_failure(job: PipelineJob, exc: Exception) -> None:
@@ -196,13 +280,14 @@ async def run_daemon() -> None:
     store = JobSnapshotStore()
     queue = PipelineQueue(store=store)
     pipeline = MeetingPipeline(config, store=store)
-    state = DaemonState(queue)
     calendar_lookup = CalendarLookupService(config.calendar)
+    start_gate = CalendarCoupledStartGate(calendar_lookup)
     session_manager = MeetingSessionManager(
         queue=queue,
         calendar_lookup=calendar_lookup,
         recorder=create_session_recorder(config.audio),
     )
+    state = DaemonState(queue, session_manager)
     await queue.restore()
     worker = asyncio.create_task(queue.run_worker(pipeline.process, on_failure=handle_job_failure))
     loop = asyncio.get_running_loop()
@@ -215,12 +300,14 @@ async def run_daemon() -> None:
         ),
         poll_interval=config.detection.poll_interval_seconds,
         grace_period_seconds=config.detection.grace_period_seconds,
+        activity_gate=start_gate.allows,
     )
     detector.start()
     try:
         while True:
+            await handle_control_request(session_manager, state)
             state.write()
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)
     finally:
         detector.stop()
         worker.cancel()

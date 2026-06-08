@@ -86,3 +86,36 @@ def test_meeting_session_manager_starts_and_enqueues_job(tmp_path: Path, monkeyp
         assert restored[0].session_id == "session-1"
 
     asyncio.run(runner())
+
+
+def test_meeting_session_manager_supports_manual_start_stop(tmp_path: Path, monkeypatch):
+    async def runner():
+        queue = PipelineQueue(store=JobSnapshotStore(tmp_path / "jobs"))
+        recorder = _FakeRecorder()
+        manager = MeetingSessionManager(
+            queue=queue,
+            calendar_lookup=_FakeCalendarLookup(None),
+            recorder=recorder,
+        )
+        monkeypatch.setattr(
+            "mt_linux.runtime.meeting_sessions.create_session_paths",
+            lambda title: CaptureSession(
+                session_id="session-manual",
+                app_audio_path=tmp_path / "audio" / "app.wav",
+                mic_audio_path=tmp_path / "audio" / "mic.wav",
+            ),
+        )
+
+        active = await manager.start_manual_recording(title="Ad Hoc", app="slack")
+        assert active is not None
+        assert active.meeting_info.detection_method == "manual"
+        assert active.meeting_info.app == "slack"
+        assert active.meeting_info.title == "Ad Hoc"
+
+        job = await manager.stop_manual_recording()
+        assert job is not None
+        assert job.session_id == "session-manual"
+        assert job.meeting_info.detection_method == "manual"
+        assert recorder.stopped == ["session-manual"]
+
+    asyncio.run(runner())

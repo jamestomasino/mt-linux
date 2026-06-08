@@ -46,6 +46,8 @@ class PipelineQueue:
             self.store.save(job)
             try:
                 await processor(job)
+                if job.status not in {JobStatus.COMPLETE, JobStatus.FAILED}:
+                    await self._queue.put(job)
             except Exception as exc:
                 job.status = JobStatus.FAILED
                 job.error = str(exc)

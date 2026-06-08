@@ -19,6 +19,7 @@ The current design is focused on:
 - rank overlapping calendar candidates and flag ambiguous matches
 - record separate app and mic WAV files
 - transcribe imported or recorded WAV files
+- process jobs in resumable stages so transcription and diarization do not have to restart from scratch after an interruption
 - match known speakers from stored voice profiles
 - queue speaker review for unknown voices
 - queue meeting review when the calendar match is ambiguous
@@ -43,6 +44,7 @@ Important runtime paths outside the repo:
 - `~/.local/share/mt-linux/meeting_review_queue.json`: meeting review queue
 - `~/.local/share/mt-linux/jobs/`: persisted pipeline jobs
 - `~/.local/state/mt-linux/daemon_state.json`: daemon state snapshot
+- `~/.local/state/mt-linux/control_request.json`: one-shot manual control request file
 
 ## Installation
 
@@ -190,6 +192,9 @@ Core control:
 mt-ctl start
 mt-ctl stop
 mt-ctl status
+mt-ctl record start --title "Ad Hoc" --app slack
+mt-ctl record stop
+mt-ctl record status
 mt-ctl jobs
 mt-ctl jobs list
 mt-ctl jobs cancel <session_id>
@@ -216,6 +221,21 @@ Audio import and corpus export:
 mt-ctl import meeting.wav --title "Weekly Standup"
 mt-ctl export-corpus --format jsonl
 ```
+
+Manual ad-hoc recording:
+
+- `mt-ctl record start` asks the running daemon to begin recording immediately, even without auto-detection
+- use `--app` to label the source, such as `slack`, `meet`, or `manual`
+- use `--title` to set a better session name for the eventual transcript
+- `mt-ctl record stop` stops the manual session and queues it for normal staged processing
+- `mt-ctl record status` shows the currently active recording session, whether it was auto-detected or started manually
+
+Queued processing behavior:
+
+- pending jobs are persisted under `~/.local/share/mt-linux/jobs/`
+- transcription and diarization are treated as separate persisted stages
+- if the daemon or machine is interrupted after transcription completes, the restored job resumes from the diarization stage instead of rerunning Whisper
+- `mt-ctl process-jobs` also respects this staged behavior and will continue jobs through to completion
 
 Speaker profile management:
 

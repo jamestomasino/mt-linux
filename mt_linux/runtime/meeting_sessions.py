@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from mt_linux.audio.capture import CaptureSession, create_session_paths
 from mt_linux.audio.session_recorder import PlaceholderRecorder, RecordingHandle, SessionRecorder
@@ -33,6 +34,27 @@ class MeetingSessionManager:
     @property
     def active(self) -> ActiveMeeting | None:
         return self._active
+
+    async def start_manual_recording(self, *, title: str = "", app: str = "manual") -> ActiveMeeting | None:
+        if self._active is not None:
+            return None
+        meeting_info = MeetingInfo(
+            app=app or "manual",
+            pid=0,
+            detection_method="manual",
+            start_time=datetime.now(UTC),
+            title=title or None,
+        )
+        await self.handle_meeting_start(meeting_info)
+        return self._active
+
+    async def stop_manual_recording(self) -> PipelineJob | None:
+        if self._active is None:
+            return None
+        active = self._active
+        if active.meeting_info.detection_method != "manual":
+            return None
+        return await self.handle_meeting_end(active.meeting_info)
 
     async def handle_meeting_start(self, meeting_info: MeetingInfo) -> None:
         if self._active is not None:

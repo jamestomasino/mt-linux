@@ -7,12 +7,16 @@ from pathlib import Path
 from typing import Any
 
 from mt_linux.models import Attendee, CalendarEvent, MeetingInfo
+from mt_linux.diarization.diarizer import DiarizationSegment
+from mt_linux.models import TranscriptSegment
 
 
 class JobStatus(str, Enum):
     PENDING = "pending"
     TRANSCRIBING = "transcribing"
+    TRANSCRIBED = "transcribed"
     DIARIZING = "diarizing"
+    DIARIZED = "diarized"
     GENERATING_PROTOCOL = "generating_protocol"
     WRITING_OUTPUT = "writing_output"
     COMPLETE = "complete"
@@ -29,6 +33,9 @@ class PipelineJob:
     status: JobStatus = JobStatus.PENDING
     error: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    transcript_segments: list[TranscriptSegment] | None = None
+    diarization_segments: list[DiarizationSegment] | None = None
+    summary: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         meeting = asdict(self.meeting_info)
@@ -48,6 +55,13 @@ class PipelineJob:
             "status": self.status.value,
             "error": self.error,
             "created_at": self.created_at.isoformat(),
+            "transcript_segments": [asdict(segment) for segment in self.transcript_segments]
+            if self.transcript_segments is not None
+            else None,
+            "diarization_segments": [asdict(segment) for segment in self.diarization_segments]
+            if self.diarization_segments is not None
+            else None,
+            "summary": self.summary,
         }
 
     @classmethod
@@ -104,4 +118,15 @@ class PipelineJob:
             status=JobStatus(data.get("status", JobStatus.PENDING.value)),
             error=data.get("error"),
             created_at=datetime.fromisoformat(data["created_at"]),
+            transcript_segments=[
+                TranscriptSegment(**item) for item in data["transcript_segments"]
+            ]
+            if data.get("transcript_segments") is not None
+            else None,
+            diarization_segments=[
+                DiarizationSegment(**item) for item in data["diarization_segments"]
+            ]
+            if data.get("diarization_segments") is not None
+            else None,
+            summary=data.get("summary"),
         )

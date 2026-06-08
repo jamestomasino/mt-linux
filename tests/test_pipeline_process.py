@@ -12,6 +12,11 @@ from mt_linux.pipeline.snapshot import JobSnapshotStore
 from tests.helpers import write_test_wav
 
 
+async def _run_job_to_completion(pipeline: MeetingPipeline, job: PipelineJob) -> None:
+    while job.status != JobStatus.COMPLETE:
+        await pipeline.process(job)
+
+
 def test_pipeline_process_writes_output_and_review_queue(tmp_path: Path, monkeypatch):
     audio_path = write_test_wav(tmp_path / "input.wav", seconds=3)
     config = AppConfig()
@@ -50,7 +55,7 @@ def test_pipeline_process_writes_output_and_review_queue(tmp_path: Path, monkeyp
     monkeypatch.setattr(pipeline, "_generate_protocol", lambda _job, _segments: "Summary text")
     monkeypatch.setattr("mt_linux.daemon.notify", lambda *args, **kwargs: None)
 
-    asyncio.run(pipeline.process(job))
+    asyncio.run(_run_job_to_completion(pipeline, job))
 
     assert job.status == JobStatus.COMPLETE
     output_files = list((tmp_path / "out").glob("*.md"))
@@ -102,7 +107,7 @@ def test_pipeline_process_uses_speaker_profiles_before_review(tmp_path: Path, mo
     monkeypatch.setattr(pipeline, "_get_speaker_matcher", lambda: _FakeMatcher())
     monkeypatch.setattr("mt_linux.daemon.notify", lambda *args, **kwargs: None)
 
-    asyncio.run(pipeline.process(job))
+    asyncio.run(_run_job_to_completion(pipeline, job))
 
     output_files = list((tmp_path / "out").glob("*.md"))
     assert len(output_files) == 1
@@ -171,7 +176,7 @@ def test_pipeline_process_queues_ambiguous_meeting_review(tmp_path: Path, monkey
     monkeypatch.setattr(pipeline, "_generate_protocol", lambda _job, _segments: "Summary text")
     monkeypatch.setattr("mt_linux.daemon.notify", lambda *args, **kwargs: None)
 
-    asyncio.run(pipeline.process(job))
+    asyncio.run(_run_job_to_completion(pipeline, job))
     entries = pipeline.meeting_review_queue.load()
     assert len(entries) == 1
     assert entries[0].selected_event_id == "event-1"
@@ -209,7 +214,7 @@ def test_pipeline_process_writes_output_when_diarization_fails(tmp_path: Path, m
     monkeypatch.setattr(pipeline, "_generate_protocol", lambda _job, _segments: "Summary text")
     monkeypatch.setattr("mt_linux.daemon.notify", lambda *args, **kwargs: None)
 
-    asyncio.run(pipeline.process(job))
+    asyncio.run(_run_job_to_completion(pipeline, job))
 
     assert job.status == JobStatus.COMPLETE
     output_files = list((tmp_path / "out").glob("*.md"))
@@ -251,7 +256,7 @@ def test_pipeline_process_mixes_app_and_mic_for_processing(tmp_path: Path, monke
     monkeypatch.setattr(pipeline, "_generate_protocol", lambda _job, _segments: "Summary text")
     monkeypatch.setattr("mt_linux.daemon.notify", lambda *args, **kwargs: None)
 
-    asyncio.run(pipeline.process(job))
+    asyncio.run(_run_job_to_completion(pipeline, job))
 
     assert seen["path"].name == "session-5_mix.wav"
     assert seen["path"].exists()
@@ -290,9 +295,52 @@ def test_pipeline_process_skips_protocol_for_non_substantive_transcript(tmp_path
     monkeypatch.setattr(pipeline, "_diarize", lambda _job: [])
     monkeypatch.setattr("mt_linux.daemon.notify", lambda *args, **kwargs: None)
 
-    asyncio.run(pipeline.process(job))
+    asyncio.run(_run_job_to_completion(pipeline, job))
 
     output_files = list((tmp_path / "out").glob("*.md"))
     assert len(output_files) == 1
     content = output_files[0].read_text(encoding="utf-8")
     assert "No substantive transcript captured - protocol generation skipped." in content
+
+
+def test_pipeline_process_resumes_after_transcription_without_rerunning_it(tmp_path: Path, monkeypatch):
+    audio_path = write_test_wav(tmp_path / "input.wav", seconds=3)
+    config = AppConfig()
+    config.output.folder = str(tmp_path / "out")
+    store = JobSnapshotStore(tmp_path / "jobs")
+    pipeline = MeetingPipeline(config, store=store)
+    pipeline.review_queue = ReviewQueue(tmp_path / "review_queue.json")
+    job = PipelineJob(
+        session_id="session-7",
+        app_audio_path=audio_path,
+        mic_audio_path=audio_path,
+        imported_audio_path=audio_path,
+        meeting_info=MeetingInfo(
+            app="zoom",
+            pid=1,
+            detection_method="import",
+            start_time=datetime(2026, 6, 7, 14, 30, tzinfo=UTC),
+            title="Weekly Standup",
+        ),
+        status=JobStatus.TRANSCRIBED,
+        transcript_segments=[TranscriptSegment(start=0.0, end=1.0, text="Hello")],
+    )
+
+    def _transcribe(_job):
+        raise AssertionError("transcription should not rerun")
+
+    monkeypatch.setattr(pipeline, "_transcribe", _transcribe)
+    monkeypatch.setattr(pipeline, "_diarize", lambda _job: [])
+    monkeypatch.setattr(pipeline, "_generate_protocol", lambda _job, _segments: "Summary text")
+    monkeypatch.setattr("mt_linux.daemon.notify", lambda *args, **kwargs: None)
+
+    asyncio.run(pipeline.process(job))
+    assert job.status == JobStatus.DIARIZED
+    assert job.diarization_segments == []
+
+    asyncio.run(pipeline.process(job))
+    assert job.status == JobStatus.COMPLETE
+    output_files = list((tmp_path / "out").glob("*.md"))
+    assert len(output_files) == 1
+    content = output_files[0].read_text(encoding="utf-8")
+    assert "Summary text" in content

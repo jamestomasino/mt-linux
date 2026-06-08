@@ -22,6 +22,7 @@ MEETING_REVIEW_QUEUE_FILE = DATA_DIR / "meeting_review_queue.json"
 REVIEW_SAMPLES_DIR = DATA_DIR / "review-samples"
 SPEAKERS_DB_FILE = DATA_DIR / "speakers.json"
 STATE_FILE = STATE_DIR / "daemon_state.json"
+CONTROL_REQUEST_FILE = STATE_DIR / "control_request.json"
 
 
 def ensure_directories() -> None:

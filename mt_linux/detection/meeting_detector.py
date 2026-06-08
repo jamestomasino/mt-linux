@@ -28,12 +28,19 @@ class DetectorCallbacks:
 
 
 class PipeWireActivityPoller:
-    def __init__(self, poll_interval: int, callbacks: DetectorCallbacks, grace_period_seconds: int = 15):
+    def __init__(
+        self,
+        poll_interval: int,
+        callbacks: DetectorCallbacks,
+        grace_period_seconds: int = 15,
+        activity_gate: Callable[[str, int, int], bool] | None = None,
+    ):
         self.poll_interval = poll_interval
         self.callbacks = callbacks
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._activity_state = MeetingActivityState(grace_period_seconds=grace_period_seconds)
+        self._activity_gate = activity_gate
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -49,6 +56,10 @@ class PipeWireActivityPoller:
     def _run(self) -> None:
         while not self._stop.is_set():
             active = get_active_meeting_pid()
+            if active is not None and self._activity_gate is not None:
+                app, pid, stream_id = active
+                if not self._activity_gate(app, pid, stream_id):
+                    active = None
             transition = self._activity_state.update(active)
             if transition.started:
                 app, pid, stream_id = transition.started
@@ -77,12 +88,20 @@ class PipeWireActivityPoller:
 
 
 class MeetingDetector:
-    def __init__(self, on_meeting_start, on_meeting_end, poll_interval: int = 5, grace_period_seconds: int = 15):
+    def __init__(
+        self,
+        on_meeting_start,
+        on_meeting_end,
+        poll_interval: int = 5,
+        grace_period_seconds: int = 15,
+        activity_gate: Callable[[str, int, int], bool] | None = None,
+    ):
         callbacks = DetectorCallbacks(on_meeting_start=on_meeting_start, on_meeting_end=on_meeting_end)
         self._pipewire_poller = PipeWireActivityPoller(
             poll_interval,
             callbacks,
             grace_period_seconds=grace_period_seconds,
+            activity_gate=activity_gate,
         )
 
     def start(self) -> None:

@@ -42,3 +42,45 @@ def test_pipeline_queue_persists_and_processes_job(tmp_path: Path):
         assert restored == []
 
     asyncio.run(runner())
+
+
+def test_pipeline_queue_requeues_incomplete_job_until_complete(tmp_path: Path):
+    async def runner() -> None:
+        store = JobSnapshotStore(tmp_path)
+        queue = PipelineQueue(store=store)
+        job = PipelineJob(
+            session_id="session-2",
+            app_audio_path=tmp_path / "app.wav",
+            mic_audio_path=tmp_path / "mic.wav",
+            meeting_info=MeetingInfo(
+                app="zoom",
+                pid=1,
+                detection_method="import",
+                start_time=datetime(2026, 6, 7, 14, 30),
+            ),
+        )
+        await queue.enqueue(job)
+        seen_statuses: list[JobStatus] = []
+
+        async def processor(item: PipelineJob) -> None:
+            seen_statuses.append(item.status)
+            if item.status == JobStatus.PENDING:
+                item.status = JobStatus.TRANSCRIBED
+                store.save(item)
+                return
+            item.status = JobStatus.COMPLETE
+            store.save(item)
+            raise asyncio.CancelledError
+
+        task = asyncio.create_task(queue.run_worker(processor))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert seen_statuses == [JobStatus.PENDING, JobStatus.TRANSCRIBED]
+        assert store.load_pending() == []
+
+    asyncio.run(runner())

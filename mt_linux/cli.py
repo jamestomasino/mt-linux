@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -13,6 +14,7 @@ from mt_linux.audio.wav import wav_duration_minutes
 from mt_linux.bootstrap import bootstrap_local_config
 from mt_linux.cleanup import cleanup_runtime_artifacts
 from mt_linux.config import AppConfig
+from mt_linux.control import build_request, wait_for_result, write_request
 from mt_linux.corpus import export_markdown_corpus
 from mt_linux.daemon import MeetingPipeline
 from mt_linux.detection.google_auth import run_google_auth
@@ -26,7 +28,7 @@ from mt_linux.output.transcript_patch import (
     replace_speaker_label,
 )
 from mt_linux.paths import STATE_FILE, ensure_directories
-from mt_linux.pipeline.job import PipelineJob
+from mt_linux.pipeline.job import JobStatus, PipelineJob
 from mt_linux.pipeline.job_admin import remove_job
 from mt_linux.pipeline.meeting_review_queue import MeetingReviewQueue
 from mt_linux.pipeline.snapshot import JobSnapshotStore
@@ -58,6 +60,63 @@ def status() -> None:
         click.echo(STATE_FILE.read_text(encoding="utf-8"))
     else:
         click.echo("No daemon state has been written yet.")
+
+
+@cli.group()
+def record() -> None:
+    """Manually start and stop ad-hoc recordings through the daemon."""
+
+
+@record.command("start")
+@click.option("--title", default="", help="Optional title for the recording session.")
+@click.option("--app", default="manual", help="Logical app/source label, e.g. slack or meet.")
+def record_start(title: str, app: str) -> None:
+    request = build_request("start", title=title, app=app)
+    try:
+        write_request(request)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    result = wait_for_result(request.request_id)
+    if result is None:
+        raise click.ClickException("Timed out waiting for the daemon to start manual recording.")
+    if result.status != "ok":
+        raise click.ClickException(result.message)
+    click.echo(result.message)
+    if result.session_id:
+        click.echo(f"Session: {result.session_id}")
+
+
+@record.command("stop")
+def record_stop() -> None:
+    request = build_request("stop")
+    try:
+        write_request(request)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    result = wait_for_result(request.request_id)
+    if result is None:
+        raise click.ClickException("Timed out waiting for the daemon to stop manual recording.")
+    if result.status != "ok":
+        raise click.ClickException(result.message)
+    click.echo(result.message)
+    if result.session_id:
+        click.echo(f"Queued job: {result.session_id}")
+
+
+@record.command("status")
+def record_status() -> None:
+    if not STATE_FILE.exists():
+        click.echo("No daemon state has been written yet.")
+        return
+    state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    active = state.get("active_meeting")
+    if not active:
+        click.echo("No active recording session.")
+        return
+    click.echo(
+        f"{active.get('session_id', '')}  {active.get('detection_method', '')}  "
+        f"{active.get('app', '')}  {active.get('title', '')}"
+    )
 
 
 @cli.group(invoke_without_command=True)
@@ -137,7 +196,8 @@ def process_jobs() -> None:
         return
     pipeline = MeetingPipeline(AppConfig.load(), store=store)
     for job in pending:
-        asyncio.run(pipeline.process(job))
+        while job.status not in {JobStatus.COMPLETE, JobStatus.FAILED}:
+            asyncio.run(pipeline.process(job))
         click.echo(f"Processed {job.session_id}")
 
 
