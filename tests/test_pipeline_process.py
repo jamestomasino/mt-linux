@@ -255,3 +255,44 @@ def test_pipeline_process_mixes_app_and_mic_for_processing(tmp_path: Path, monke
 
     assert seen["path"].name == "session-5_mix.wav"
     assert seen["path"].exists()
+
+
+def test_pipeline_process_skips_protocol_for_non_substantive_transcript(tmp_path: Path, monkeypatch):
+    audio_path = write_test_wav(tmp_path / "input.wav", seconds=3)
+    config = AppConfig()
+    config.output.folder = str(tmp_path / "out")
+    config.protocol.enabled = True
+    store = JobSnapshotStore(tmp_path / "jobs")
+    pipeline = MeetingPipeline(config, store=store)
+    pipeline.review_queue = ReviewQueue(tmp_path / "review_queue.json")
+    job = PipelineJob(
+        session_id="session-6",
+        app_audio_path=audio_path,
+        mic_audio_path=audio_path,
+        imported_audio_path=audio_path,
+        meeting_info=MeetingInfo(
+            app="slack",
+            pid=1,
+            detection_method="pipewire",
+            start_time=datetime(2026, 6, 8, 14, 0, tzinfo=UTC),
+            title="Dummy Huddle",
+        ),
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "_transcribe",
+        lambda _job: [
+            TranscriptSegment(start=0.0, end=0.5, text="yeah"),
+            TranscriptSegment(start=0.5, end=1.0, text="okay"),
+        ],
+    )
+    monkeypatch.setattr(pipeline, "_diarize", lambda _job: [])
+    monkeypatch.setattr("mt_linux.daemon.notify", lambda *args, **kwargs: None)
+
+    asyncio.run(pipeline.process(job))
+
+    output_files = list((tmp_path / "out").glob("*.md"))
+    assert len(output_files) == 1
+    content = output_files[0].read_text(encoding="utf-8")
+    assert "No substantive transcript captured - protocol generation skipped." in content

@@ -18,6 +18,7 @@ MEETING_PROCESS_NAMES = {
     "zoom": "zoom",
     "zoom.real": "zoom",
     "teams-for-linux": "teams",
+    "slack": "slack",
 }
 
 

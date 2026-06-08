@@ -22,6 +22,7 @@ from mt_linux.pipeline.queue import PipelineQueue
 from mt_linux.pipeline.review_queue import ReviewQueue
 from mt_linux.pipeline.snapshot import JobSnapshotStore
 from mt_linux.protocol.ollama_generator import OllamaProtocolGenerator
+from mt_linux.protocol.quality import has_substantive_transcript
 from mt_linux.runtime.meeting_sessions import MeetingSessionManager
 from mt_linux.transcription.faster_whisper import FasterWhisperEngine
 
@@ -115,6 +116,8 @@ class MeetingPipeline:
         self.store.save(job)
         if not self.config.protocol.enabled:
             return ""
+        if not has_substantive_transcript(segments):
+            return "No substantive transcript captured - protocol generation skipped."
         transcript = "\n".join(segment.text for segment in segments)
         generator = OllamaProtocolGenerator(self.config.protocol)
         try:
