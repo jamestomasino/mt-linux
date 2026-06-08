@@ -7,7 +7,7 @@ import wave
 
 from mt_linux.audio.capture import CaptureSession
 from mt_linux.audio.commands import build_default_mic_record_command, build_source_record_command
-from mt_linux.audio.pipewire import create_virtual_sink, route_app_to_sink, unload_module
+from mt_linux.audio.pulse import get_preferred_system_capture_source_name
 from mt_linux.audio.processes import RecordingProcess, start_recording_process, stop_recording_process
 
 
@@ -18,8 +18,7 @@ class RecordingHandle:
 
 @dataclass
 class PipeWireRecordingHandle(RecordingHandle):
-    module_id: str
-    sink_name: str
+    system_source_name: str
     app_process: RecordingProcess
     mic_process: RecordingProcess
 
@@ -59,15 +58,18 @@ class PipeWireSessionRecorder(SessionRecorder):
         recorder_executable: str = "pw-record",
         sample_rate: int = 16000,
         mic_device_name: str = "",
+        system_source_name: str = "",
     ):
         self.recorder_executable = recorder_executable
         self.sample_rate = sample_rate
         self.mic_device_name = mic_device_name
+        self.system_source_name = system_source_name
 
     def start(self, session: CaptureSession, app_pid: int) -> PipeWireRecordingHandle:
-        sink_name = f"mt-linux-{session.session_id}"
-        monitor_source, module_id = create_virtual_sink(sink_name)
-        route_app_to_sink(app_pid, sink_name)
+        monitor_source = get_preferred_system_capture_source_name(
+            app_pid,
+            explicit_source_name=self.system_source_name,
+        )
         app_command = build_source_record_command(
             self.recorder_executable,
             monitor_source,
@@ -80,16 +82,11 @@ class PipeWireSessionRecorder(SessionRecorder):
             sample_rate=self.sample_rate,
             device_name=self.mic_device_name,
         )
-        try:
-            app_process = start_recording_process(app_command, session.app_audio_path, "app")
-            mic_process = start_recording_process(mic_command, session.mic_audio_path, "mic")
-        except Exception:
-            unload_module(module_id)
-            raise
+        app_process = start_recording_process(app_command, session.app_audio_path, "app")
+        mic_process = start_recording_process(mic_command, session.mic_audio_path, "mic")
         return PipeWireRecordingHandle(
             session=session,
-            module_id=module_id,
-            sink_name=sink_name,
+            system_source_name=monitor_source,
             app_process=app_process,
             mic_process=mic_process,
         )
@@ -100,7 +97,4 @@ class PipeWireSessionRecorder(SessionRecorder):
         try:
             stop_recording_process(handle.app_process)
         finally:
-            try:
-                stop_recording_process(handle.mic_process)
-            finally:
-                unload_module(handle.module_id)
+            stop_recording_process(handle.mic_process)

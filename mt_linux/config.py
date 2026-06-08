@@ -13,6 +13,7 @@ from mt_linux.paths import CONFIG_FILE, CONFIG_DIR, SPEAKERS_DB_FILE, ensure_dir
 class AudioConfig:
     mic_device_name: str = ""
     app_audio_backend: str = "pipewire"
+    system_source_name: str = ""
 
 
 @dataclass

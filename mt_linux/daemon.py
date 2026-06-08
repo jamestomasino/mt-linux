@@ -5,7 +5,7 @@ import json
 import logging
 
 from mt_linux.audio.factory import create_session_recorder
-from mt_linux.audio.wav import wav_duration_minutes
+from mt_linux.audio.wav import mix_wav_files, wav_duration_minutes, wav_files_identical
 from mt_linux.config import AppConfig
 from mt_linux.detection.calendar_lookup import CalendarLookupService
 from mt_linux.detection.meeting_detector import MeetingDetector
@@ -35,11 +35,15 @@ class MeetingPipeline:
         self._speaker_matcher: SpeakerMatcher | None = None
 
     async def process(self, job: PipelineJob) -> None:
-        audio_path = job.imported_audio_path or job.app_audio_path
+        audio_path = self._processing_audio_path(job)
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file does not exist: {audio_path}")
         transcription_segments = await asyncio.to_thread(self._transcribe, job)
-        diarization_segments = await asyncio.to_thread(self._diarize, job)
+        try:
+            diarization_segments = await asyncio.to_thread(self._diarize, job)
+        except Exception:
+            logging.exception("Diarization failed for %s", job.session_id)
+            diarization_segments = []
         transcript_segments = assign_speakers_to_transcript(transcription_segments, diarization_segments)
         summary = await asyncio.to_thread(self._generate_protocol, job, transcript_segments)
         rendered = render_meeting_markdown(
@@ -55,7 +59,7 @@ class MeetingPipeline:
             transcript_path=rendered.path,
             review_queue=self.review_queue,
             job=job,
-            source_audio_path=job.imported_audio_path or job.app_audio_path,
+            source_audio_path=audio_path,
             speaker_matcher=self._get_speaker_matcher(),
         )
         rendered = render_meeting_markdown(
@@ -85,7 +89,7 @@ class MeetingPipeline:
     def _transcribe(self, job: PipelineJob) -> list[TranscriptSegment]:
         job.status = JobStatus.TRANSCRIBING
         self.store.save(job)
-        audio_path = job.imported_audio_path or job.app_audio_path
+        audio_path = self._processing_audio_path(job)
         if self.config.transcription.engine != "faster-whisper":
             return []
         try:
@@ -99,7 +103,7 @@ class MeetingPipeline:
         self.store.save(job)
         if not self.config.diarization.enabled or not self.config.diarization.hf_token:
             return []
-        audio_path = job.imported_audio_path or job.app_audio_path
+        audio_path = self._processing_audio_path(job)
         try:
             diarizer = PyannoteDiarizer(self.config.diarization.hf_token)
         except RuntimeError:
@@ -132,7 +136,7 @@ class MeetingPipeline:
             return
         from mt_linux.models import MeetingReviewEntry
 
-        audio_path = job.imported_audio_path or job.app_audio_path
+        audio_path = self._processing_audio_path(job)
         self.meeting_review_queue.add(
             MeetingReviewEntry(
                 session_id=job.session_id,
@@ -152,6 +156,16 @@ class MeetingPipeline:
                 ],
             )
         )
+
+    def _processing_audio_path(self, job: PipelineJob):
+        if job.imported_audio_path is not None:
+            return job.imported_audio_path
+        if wav_files_identical(job.app_audio_path, job.mic_audio_path):
+            return job.app_audio_path
+        mixed_path = job.app_audio_path.with_name(f"{job.session_id}_mix.wav")
+        if not mixed_path.exists():
+            mix_wav_files(job.app_audio_path, job.mic_audio_path, mixed_path)
+        return mixed_path
 
 
 class DaemonState:

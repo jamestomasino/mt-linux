@@ -11,6 +11,7 @@ import click
 
 from mt_linux.audio.wav import wav_duration_minutes
 from mt_linux.bootstrap import bootstrap_local_config
+from mt_linux.cleanup import cleanup_runtime_artifacts
 from mt_linux.config import AppConfig
 from mt_linux.corpus import export_markdown_corpus
 from mt_linux.daemon import MeetingPipeline
@@ -26,6 +27,7 @@ from mt_linux.output.transcript_patch import (
 )
 from mt_linux.paths import STATE_FILE, ensure_directories
 from mt_linux.pipeline.job import PipelineJob
+from mt_linux.pipeline.job_admin import remove_job
 from mt_linux.pipeline.meeting_review_queue import MeetingReviewQueue
 from mt_linux.pipeline.snapshot import JobSnapshotStore
 from mt_linux.pipeline.review_queue import ReviewQueue
@@ -58,8 +60,16 @@ def status() -> None:
         click.echo("No daemon state has been written yet.")
 
 
-@cli.command()
-def jobs() -> None:
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def jobs(ctx: click.Context) -> None:
+    """Inspect and manage persisted jobs."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(jobs_list)
+
+
+@jobs.command("list")
+def jobs_list() -> None:
     """List persisted jobs."""
     store = JobSnapshotStore()
     pending = store.load_pending()
@@ -68,6 +78,33 @@ def jobs() -> None:
         return
     for job in pending:
         click.echo(f"{job.session_id}  {job.status.value}  {job.meeting_info.title or job.meeting_info.app}")
+
+
+@jobs.command("cancel")
+@click.argument("session_ids", nargs=-1, required=True)
+@click.option("--delete-audio", is_flag=True, help="Delete app/mic/mix recordings for the canceled job.")
+def jobs_cancel(session_ids: tuple[str, ...], delete_audio: bool) -> None:
+    """Remove one or more persisted jobs from the queue."""
+    store = JobSnapshotStore()
+    review_queue = ReviewQueue()
+    meeting_review_queue = MeetingReviewQueue()
+    canceled = 0
+    for session_id in session_ids:
+        removed, deleted_paths = remove_job(
+            session_id,
+            delete_audio=delete_audio,
+            review_queue=review_queue,
+            meeting_review_queue=meeting_review_queue,
+            store=store,
+        )
+        if not removed:
+            click.echo(f"Job not found: {session_id}")
+            continue
+        canceled += 1
+        detail = f" and deleted {len(deleted_paths)} file(s)" if deleted_paths else ""
+        click.echo(f"Canceled {session_id}{detail}")
+    if canceled == 0:
+        raise SystemExit(1)
 
 
 @cli.command()
@@ -102,6 +139,33 @@ def process_jobs() -> None:
     for job in pending:
         asyncio.run(pipeline.process(job))
         click.echo(f"Processed {job.session_id}")
+
+
+@cli.command("cleanup")
+@click.option("--dry-run", is_flag=True, help="Show what would be removed without deleting anything.")
+@click.option(
+    "--include-job-history",
+    is_flag=True,
+    help="Also remove completed and failed job snapshot files before cleaning orphans.",
+)
+def cleanup(dry_run: bool, include_job_history: bool) -> None:
+    """Remove orphaned runtime artifacts."""
+    store = JobSnapshotStore()
+    review_queue = ReviewQueue()
+    result = cleanup_runtime_artifacts(
+        dry_run=dry_run,
+        include_job_history=include_job_history,
+        store=store,
+        review_queue=review_queue,
+    )
+    if result.removed_job_snapshots:
+        for path in result.removed_job_snapshots:
+            click.echo(f"{'Would remove' if dry_run else 'Removed'} job snapshot: {path}")
+    if result.removed_paths:
+        for path in result.removed_paths:
+            click.echo(f"{'Would remove' if dry_run else 'Removed'} artifact: {path}")
+    if not result.removed_job_snapshots and not result.removed_paths:
+        click.echo("Nothing to clean up.")
 
 
 @cli.group()

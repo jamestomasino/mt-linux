@@ -14,6 +14,7 @@ def create_session_recorder(config: AudioConfig) -> SessionRecorder:
             recorder_executable=command,
             sample_rate=16000,
             mic_device_name=config.mic_device_name,
+            system_source_name=config.system_source_name,
         )
     logging.warning("No PipeWire recorder command available; using placeholder recorder.")
     return PlaceholderRecorder()

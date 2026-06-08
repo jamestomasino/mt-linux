@@ -22,7 +22,7 @@ class PyannoteDiarizer:
             ) from exc
         self.pipeline = DiarizationPipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token=hf_token,
+            token=hf_token,
         )
         self.pipeline.to(torch.device("cpu"))
         self.num_speakers = num_speakers

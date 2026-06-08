@@ -183,6 +183,7 @@ mt-ctl stop
 mt-ctl status
 mt-ctl jobs
 mt-ctl process-jobs
+mt-ctl cleanup
 ```
 
 Diagnostics and setup:

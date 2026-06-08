@@ -23,10 +23,28 @@ class JobSnapshotStore:
         tmp.replace(path)
         return path
 
-    def load_pending(self) -> list[PipelineJob]:
+    def load_all(self) -> list[PipelineJob]:
         jobs: list[PipelineJob] = []
         for path in sorted(self.jobs_dir.glob("*.json")):
-            job = PipelineJob.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            jobs.append(PipelineJob.from_dict(json.loads(path.read_text(encoding="utf-8"))))
+        return jobs
+
+    def load_one(self, session_id: str) -> PipelineJob | None:
+        path = self.path_for(session_id)
+        if not path.exists():
+            return None
+        return PipelineJob.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+    def remove(self, session_id: str) -> bool:
+        path = self.path_for(session_id)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+    def load_pending(self) -> list[PipelineJob]:
+        jobs: list[PipelineJob] = []
+        for job in self.load_all():
             if job.status not in {JobStatus.COMPLETE, JobStatus.FAILED}:
                 jobs.append(job)
         return jobs
