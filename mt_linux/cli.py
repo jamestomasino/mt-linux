@@ -64,7 +64,7 @@ def status() -> None:
 
 @cli.group()
 def record() -> None:
-    """Manually start and stop ad-hoc recordings through the daemon."""
+    """Control manual recordings."""
 
 
 @record.command("start")
@@ -122,7 +122,7 @@ def record_status() -> None:
 @cli.group(invoke_without_command=True)
 @click.pass_context
 def jobs(ctx: click.Context) -> None:
-    """Inspect and manage persisted jobs."""
+    """Manage jobs."""
     if ctx.invoked_subcommand is None:
         ctx.invoke(jobs_list)
 
@@ -168,7 +168,7 @@ def jobs_cancel(session_ids: tuple[str, ...], delete_audio: bool) -> None:
 
 @cli.command()
 def doctor() -> None:
-    """Validate local runtime requirements and config."""
+    """Check runtime and config."""
     results = run_doctor(AppConfig.load())
     for item in results:
         click.echo(f"[{item.status.upper()}] {item.name}: {item.detail}")
@@ -180,7 +180,7 @@ def doctor() -> None:
 
 @cli.command("bootstrap-config")
 def bootstrap_config() -> None:
-    """Create local runtime directories based on the current config."""
+    """Create local directories."""
     notes = bootstrap_local_config(AppConfig.load())
     for note in notes:
         click.echo(note)
@@ -188,7 +188,7 @@ def bootstrap_config() -> None:
 
 @cli.command("process-jobs")
 def process_jobs() -> None:
-    """Process pending jobs without running the long-lived daemon."""
+    """Process queued jobs."""
     store = JobSnapshotStore()
     pending = store.load_pending()
     if not pending:
@@ -268,6 +268,7 @@ def config_list_devices() -> None:
 @click.argument("name")
 @click.argument("audio_file", type=click.Path(path_type=Path, exists=True))
 def enroll(name: str, audio_file: Path) -> None:
+    """Add a speaker profile."""
     current = AppConfig.load()
     matcher = SpeakerMatcher(
         current.resolve_path(current.speakers.db_path),
@@ -324,7 +325,7 @@ def review_run(session_id: str) -> None:
 @cli.group("review-meetings", invoke_without_command=True)
 @click.pass_context
 def review_meetings(ctx: click.Context) -> None:
-    """Review ambiguous meeting assignments."""
+    """Review meeting matches."""
     if ctx.invoked_subcommand is None:
         ctx.invoke(review_meetings_run, session_id="")
 
@@ -402,11 +403,12 @@ def review_meetings_run(session_id: str) -> None:
         click.echo(f"Assigned to {candidate.title}")
 
 
-@cli.command()
+@cli.command("import")
 @click.argument("audio_file", type=click.Path(path_type=Path, exists=True))
 @click.option("--title", default="")
 @click.option("--app", default="import")
 def import_(audio_file: Path, title: str, app: str) -> None:
+    """Import an audio file."""
     ensure_directories()
     current = AppConfig.load()
     start_time = datetime.now(UTC)
@@ -440,6 +442,7 @@ def import_(audio_file: Path, title: str, app: str) -> None:
 @cli.command("export-corpus")
 @click.option("--format", "format_name", default="jsonl")
 def export_corpus(format_name: str) -> None:
+    """Export transcript corpus."""
     current = AppConfig.load()
     output_dir = current.resolve_path(current.output.folder)
     try:
