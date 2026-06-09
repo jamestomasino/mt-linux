@@ -344,3 +344,53 @@ def test_pipeline_process_resumes_after_transcription_without_rerunning_it(tmp_p
     assert len(output_files) == 1
     content = output_files[0].read_text(encoding="utf-8")
     assert "Summary text" in content
+
+
+def test_pipeline_process_keeps_mic_segments_on_mic_identity(tmp_path: Path, monkeypatch):
+    app_audio = write_test_wav(tmp_path / "app.wav", seconds=3, amplitude=200)
+    mic_audio = write_test_wav(tmp_path / "mic.wav", seconds=3, amplitude=600)
+    config = AppConfig()
+    config.output.folder = str(tmp_path / "out")
+    config.speakers.mic_speaker_name = "James Tomasino"
+    store = JobSnapshotStore(tmp_path / "jobs")
+    pipeline = MeetingPipeline(config, store=store)
+    pipeline.review_queue = ReviewQueue(tmp_path / "review_queue.json")
+    job = PipelineJob(
+        session_id="session-8",
+        app_audio_path=app_audio,
+        mic_audio_path=mic_audio,
+        meeting_info=MeetingInfo(
+            app="zoom",
+            pid=1,
+            detection_method="pipewire",
+            start_time=datetime(2026, 6, 7, 14, 30, tzinfo=UTC),
+            title="Weekly Standup",
+        ),
+    )
+
+    def _transcribe(_job):
+        _job.app_transcript_segments = [
+            TranscriptSegment(start=0.0, end=1.0, text="Remote hello", speaker="SPEAKER_REMOTE", track="app")
+        ]
+        _job.mic_transcript_segments = [
+            TranscriptSegment(start=0.4, end=1.4, text="Local response", speaker="James Tomasino", track="mic")
+        ]
+        return _job.mic_transcript_segments + _job.app_transcript_segments
+
+    monkeypatch.setattr(pipeline, "_transcribe", _transcribe)
+    monkeypatch.setattr(
+        pipeline,
+        "_diarize",
+        lambda _job: [DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_01")],
+    )
+    monkeypatch.setattr(pipeline, "_generate_protocol", lambda _job, _segments: "Summary text")
+    monkeypatch.setattr("mt_linux.daemon.notify", lambda *args, **kwargs: None)
+
+    asyncio.run(_run_job_to_completion(pipeline, job))
+
+    output_files = list((tmp_path / "out").glob("*.md"))
+    assert len(output_files) == 1
+    content = output_files[0].read_text(encoding="utf-8")
+    assert "James Tomasino: Local response" in content
+    assert "SPEAKER_01: Remote hello" in content
+    assert len(pipeline.review_queue.load()) == 1

@@ -2,18 +2,24 @@ from pathlib import Path
 
 from mt_linux.models import CalendarEvent
 from datetime import UTC, datetime
+from click.testing import CliRunner
 
+from mt_linux.cli import cli
+from mt_linux.models import ReviewEntry
 from mt_linux.output.transcript_patch import (
     apply_meeting_assignment,
     clear_meeting_assignment,
     replace_speaker_label,
 )
+from mt_linux.pipeline.review_queue import ReviewQueue
 
 
 def test_replace_speaker_label_updates_transcript_and_frontmatter(tmp_path: Path):
     transcript = tmp_path / "meeting.md"
     transcript.write_text(
         """---
+participants:
+  - "[[SPEAKER_01]]"
 participants_identified:
   - name: "SPEAKER_01"
     confidence: "unidentified"
@@ -127,3 +133,46 @@ calendar_candidates:
     assert 'organizer: ""' in content
     assert 'title: "Ad Hoc Meeting"' in content
     assert "duration_minutes: 0" in content
+
+
+def test_review_run_refreshes_summary_for_changed_session(tmp_path: Path, monkeypatch):
+    transcript = tmp_path / "meeting.md"
+    transcript.write_text(
+        """---
+title: "Meeting"
+---
+
+## Summary
+
+Old summary
+
+---
+
+## Transcript
+
+**14:30:00** SPEAKER_01: Hello there
+""",
+        encoding="utf-8",
+    )
+    sample = tmp_path / "sample.wav"
+    sample.write_bytes(b"wav")
+    queue = ReviewQueue(tmp_path / "review_queue.json")
+    queue.add(
+        ReviewEntry(
+            session_id="session-1",
+            speaker_label="SPEAKER_01",
+            sample_path=sample,
+            calendar_attendees=[],
+            meeting_title="Meeting",
+            meeting_date=datetime(2026, 6, 9).date(),
+            transcript_path=transcript,
+        )
+    )
+    refreshed: list[str] = []
+    monkeypatch.setattr("mt_linux.cli.ReviewQueue", lambda: queue)
+    monkeypatch.setattr("mt_linux.cli._play_sample", lambda _path: None)
+    monkeypatch.setattr("mt_linux.cli._refresh_job_summary", lambda _store, _config, session_id: refreshed.append(session_id))
+    runner = CliRunner()
+    result = runner.invoke(cli, ["review", "run"], input="Alice Smith\n", env={})
+    assert result.exit_code == 0
+    assert refreshed == ["session-1"]

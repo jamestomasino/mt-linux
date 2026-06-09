@@ -23,6 +23,12 @@ from mt_linux.pipeline.meeting_review_queue import MeetingReviewQueue
 from mt_linux.pipeline.queue import PipelineQueue
 from mt_linux.pipeline.review_queue import ReviewQueue
 from mt_linux.pipeline.snapshot import JobSnapshotStore
+from mt_linux.pipeline.transcript_tracks import (
+    MIC_SPEAKER_LABEL,
+    REMOTE_SPEAKER_LABEL,
+    merge_track_segments,
+    relabel_segments,
+)
 from mt_linux.protocol.ollama_generator import OllamaProtocolGenerator
 from mt_linux.protocol.quality import has_substantive_transcript
 from mt_linux.runtime.meeting_sessions import MeetingSessionManager
@@ -55,10 +61,8 @@ class MeetingPipeline:
             job.status = JobStatus.DIARIZED
             self.store.save(job)
             return
-        transcript_segments = assign_speakers_to_transcript(
-            job.transcript_segments,
-            job.diarization_segments,
-        )
+        transcript_segments = self._assign_transcript_speakers(job)
+        job.transcript_segments = transcript_segments
         if job.summary is None:
             job.summary = await asyncio.to_thread(self._generate_protocol, job, transcript_segments)
         rendered = render_meeting_markdown(
@@ -70,11 +74,12 @@ class MeetingPipeline:
         )
         identities = resolve_identities(
             self.config,
+            transcript_segments,
             job.diarization_segments,
             transcript_path=rendered.path,
             review_queue=self.review_queue,
             job=job,
-            source_audio_path=audio_path,
+            source_audio_path=self._identity_audio_path(job),
             speaker_matcher=self._get_speaker_matcher(),
         )
         rendered = render_meeting_markdown(
@@ -104,21 +109,40 @@ class MeetingPipeline:
     def _transcribe(self, job: PipelineJob) -> list[TranscriptSegment]:
         job.status = JobStatus.TRANSCRIBING
         self.store.save(job)
-        audio_path = self._processing_audio_path(job)
         if self.config.transcription.engine != "faster-whisper":
             return []
         try:
             engine = FasterWhisperEngine(self.config.transcription)
         except RuntimeError:
             return []
-        return engine.transcribe(audio_path, language=self.config.transcription.language or None)
+        language = self.config.transcription.language or None
+        if job.imported_audio_path is not None or wav_files_identical(job.app_audio_path, job.mic_audio_path):
+            audio_path = self._processing_audio_path(job)
+            job.app_transcript_segments = None
+            job.mic_transcript_segments = None
+            return relabel_segments(
+                engine.transcribe(audio_path, language=language),
+                speaker=self.config.speakers.mic_speaker_name or MIC_SPEAKER_LABEL,
+                track="mixed",
+            )
+        job.app_transcript_segments = relabel_segments(
+            engine.transcribe(job.app_audio_path, language=language),
+            speaker=REMOTE_SPEAKER_LABEL,
+            track="app",
+        )
+        job.mic_transcript_segments = relabel_segments(
+            engine.transcribe(job.mic_audio_path, language=language),
+            speaker=self.config.speakers.mic_speaker_name or MIC_SPEAKER_LABEL,
+            track="mic",
+        )
+        return merge_track_segments(job.mic_transcript_segments, job.app_transcript_segments)
 
     def _diarize(self, job: PipelineJob) -> list[DiarizationSegment]:
         job.status = JobStatus.DIARIZING
         self.store.save(job)
         if not self.config.diarization.enabled or not self.config.diarization.hf_token:
             return []
-        audio_path = self._processing_audio_path(job)
+        audio_path = self._diarization_audio_path(job)
         try:
             diarizer = PyannoteDiarizer(self.config.diarization.hf_token)
         except RuntimeError:
@@ -132,7 +156,7 @@ class MeetingPipeline:
             return ""
         if not has_substantive_transcript(segments):
             return "No substantive transcript captured - protocol generation skipped."
-        transcript = "\n".join(segment.text for segment in segments)
+        transcript = "\n".join(f"{segment.speaker}: {segment.text}" for segment in segments if segment.text.strip())
         generator = OllamaProtocolGenerator(self.config.protocol)
         try:
             return generator.generate(transcript, job.meeting_info)
@@ -183,6 +207,28 @@ class MeetingPipeline:
         if not mixed_path.exists():
             mix_wav_files(job.app_audio_path, job.mic_audio_path, mixed_path)
         return mixed_path
+
+    def _diarization_audio_path(self, job: PipelineJob):
+        if job.app_transcript_segments is not None:
+            return job.app_audio_path
+        return self._processing_audio_path(job)
+
+    def _identity_audio_path(self, job: PipelineJob):
+        if job.app_transcript_segments is not None:
+            return job.app_audio_path
+        return self._processing_audio_path(job)
+
+    def _assign_transcript_speakers(self, job: PipelineJob) -> list[TranscriptSegment]:
+        if job.app_transcript_segments is not None:
+            app_segments = assign_speakers_to_transcript(
+                job.app_transcript_segments,
+                job.diarization_segments,
+            )
+            return merge_track_segments(job.mic_transcript_segments or [], app_segments)
+        return assign_speakers_to_transcript(
+            job.transcript_segments or [],
+            job.diarization_segments,
+        )
 
 
 class DaemonState:

@@ -22,6 +22,8 @@ def test_job_snapshot_round_trips_staged_outputs(tmp_path: Path):
         ),
         status=JobStatus.DIARIZED,
         transcript_segments=[TranscriptSegment(start=0.0, end=1.0, text="Hello", speaker="SPEAKER_00")],
+        app_transcript_segments=[TranscriptSegment(start=0.0, end=1.0, text="Remote", speaker="SPEAKER_01", track="app")],
+        mic_transcript_segments=[TranscriptSegment(start=0.5, end=1.5, text="Local", speaker="MIC_SPEAKER", track="mic")],
         diarization_segments=[DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_01")],
         summary="Summary text",
     )
@@ -32,6 +34,10 @@ def test_job_snapshot_round_trips_staged_outputs(tmp_path: Path):
     assert restored.status == JobStatus.DIARIZED
     assert restored.transcript_segments is not None
     assert restored.transcript_segments[0].text == "Hello"
+    assert restored.app_transcript_segments is not None
+    assert restored.app_transcript_segments[0].track == "app"
+    assert restored.mic_transcript_segments is not None
+    assert restored.mic_transcript_segments[0].track == "mic"
     assert restored.diarization_segments is not None
     assert restored.diarization_segments[0].speaker == "SPEAKER_01"
     assert restored.summary == "Summary text"

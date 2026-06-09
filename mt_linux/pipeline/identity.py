@@ -8,14 +8,16 @@ from mt_linux.audio.wav import extract_wav_clip
 from mt_linux.config import AppConfig
 from mt_linux.diarization.diarizer import DiarizationSegment
 from mt_linux.diarization.speaker_matcher import SpeakerMatcher
-from mt_linux.models import ReviewEntry, SpeakerIdentity
+from mt_linux.models import ReviewEntry, SpeakerIdentity, TranscriptSegment
 from mt_linux.paths import REVIEW_SAMPLES_DIR, ensure_directories
 from mt_linux.pipeline.job import PipelineJob
 from mt_linux.pipeline.review_queue import ReviewQueue
+from mt_linux.pipeline.transcript_tracks import MIC_SPEAKER_LABEL, assign_speakers_by_overlap
 
 
 def resolve_identities(
     config: AppConfig,
+    transcript_segments: list[TranscriptSegment],
     diarization_segments: list[DiarizationSegment],
     transcript_path: Path | None = None,
     review_queue: ReviewQueue | None = None,
@@ -23,23 +25,34 @@ def resolve_identities(
     source_audio_path: Path | None = None,
     speaker_matcher: SpeakerMatcher | None = None,
 ) -> list[SpeakerIdentity]:
-    if not diarization_segments:
+    identities: list[SpeakerIdentity] = []
+    by_speaker: dict[str, list[TranscriptSegment]] = defaultdict(list)
+    for segment in transcript_segments:
+        if segment.text.strip():
+            by_speaker[segment.speaker].append(segment)
+
+    if not by_speaker:
         return [
             SpeakerIdentity(
-                label="SPEAKER_00",
-                name=config.speakers.mic_speaker_name or "SPEAKER_00",
+                label=MIC_SPEAKER_LABEL,
+                name=config.speakers.mic_speaker_name or MIC_SPEAKER_LABEL,
                 confidence="mic_track" if config.speakers.mic_speaker_name else "unidentified",
                 review_queued=not bool(config.speakers.mic_speaker_name),
             )
         ]
 
-    identities: list[SpeakerIdentity] = []
-    by_speaker: dict[str, list[DiarizationSegment]] = defaultdict(list)
-    for segment in diarization_segments:
-        by_speaker[segment.speaker].append(segment)
-
     for speaker, segments in sorted(by_speaker.items()):
-        best_segment = max(segments, key=lambda item: item.end - item.start)
+        if _is_mic_speaker(speaker, config):
+            identities.append(
+                SpeakerIdentity(
+                    label=speaker,
+                    name=config.speakers.mic_speaker_name or speaker,
+                    confidence="mic_track" if config.speakers.mic_speaker_name else "unidentified",
+                    review_queued=not bool(config.speakers.mic_speaker_name),
+                )
+            )
+            continue
+
         identity = SpeakerIdentity(
             label=speaker,
             name=speaker,
@@ -47,7 +60,8 @@ def resolve_identities(
             review_queued=True,
         )
         sample_path = None
-        if source_audio_path and source_audio_path.exists():
+        best_segment = _best_sample_segment(speaker, segments, diarization_segments)
+        if source_audio_path and source_audio_path.exists() and best_segment is not None:
             sample_path = _sample_path_for(job.session_id if job else "sample", speaker)
             extract_wav_clip(source_audio_path, sample_path, best_segment.start, best_segment.end)
         matched = _match_speaker(sample_path, speaker_matcher)
@@ -84,17 +98,10 @@ def resolve_identities(
 
 
 def assign_speakers_to_transcript(
-    transcript_segments,
+    transcript_segments: list[TranscriptSegment],
     diarization_segments: list[DiarizationSegment],
 ):
-    if not diarization_segments:
-        return transcript_segments
-    for transcript in transcript_segments:
-        for diarized in diarization_segments:
-            if transcript.start >= diarized.start and transcript.end <= diarized.end:
-                transcript.speaker = diarized.speaker
-                break
-    return transcript_segments
+    return assign_speakers_by_overlap(transcript_segments, diarization_segments)
 
 
 def _sample_path_for(session_id: str, speaker_label: str) -> Path:
@@ -114,3 +121,18 @@ def _match_speaker(
         if match is not None:
             return match[0], match[1], embedding
     return None
+
+
+def _best_sample_segment(
+    speaker: str,
+    transcript_segments: list[TranscriptSegment],
+    diarization_segments: list[DiarizationSegment],
+):
+    diarized = [segment for segment in diarization_segments if segment.speaker == speaker]
+    if diarized:
+        return max(diarized, key=lambda item: item.end - item.start)
+    return max(transcript_segments, key=lambda item: item.end - item.start, default=None)
+
+
+def _is_mic_speaker(speaker: str, config: AppConfig) -> bool:
+    return speaker in {MIC_SPEAKER_LABEL, config.speakers.mic_speaker_name}

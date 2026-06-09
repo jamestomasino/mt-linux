@@ -3,7 +3,7 @@ from pathlib import Path
 
 from mt_linux.config import AppConfig
 from mt_linux.diarization.diarizer import DiarizationSegment
-from mt_linux.models import Attendee, CalendarEvent, MeetingInfo
+from mt_linux.models import Attendee, CalendarEvent, MeetingInfo, TranscriptSegment
 from mt_linux.pipeline.identity import resolve_identities
 from mt_linux.pipeline.job import PipelineJob
 from mt_linux.pipeline.review_queue import ReviewQueue
@@ -54,6 +54,7 @@ def test_resolve_identities_creates_review_entries_for_unknown_speakers(tmp_path
     )
     identities = resolve_identities(
         config,
+        [TranscriptSegment(start=0.0, end=1.5, text="Hello", speaker="SPEAKER_01", track="app")],
         [DiarizationSegment(start=0.0, end=1.5, speaker="SPEAKER_01")],
         transcript_path=transcript_path,
         review_queue=queue,
@@ -93,6 +94,7 @@ def test_resolve_identities_uses_voice_profile_match_and_skips_review(tmp_path: 
     )
     identities = resolve_identities(
         config,
+        [TranscriptSegment(start=0.0, end=1.5, text="Hello", speaker="SPEAKER_01", track="app")],
         [DiarizationSegment(start=0.0, end=1.5, speaker="SPEAKER_01")],
         transcript_path=transcript_path,
         review_queue=queue,

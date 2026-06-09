@@ -6,4 +6,7 @@ Return sections for:
 - Action Items
 
 Keep the output grounded in the transcript.
+Use speaker names exactly as they appear in the transcript when attribution is clear.
+Do not output placeholders like [Name], [Person], TBD, or Unknown Speaker.
+If attribution is unclear, write the action item or decision without inventing an actor.
 """

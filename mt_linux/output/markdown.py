@@ -165,14 +165,36 @@ def _transcript_body(
 ) -> str:
     identity_map = {identity.label: identity for identity in identities}
     lines: list[str] = []
-    for segment in segments:
-        timestamp = job.meeting_info.start_time + timedelta(seconds=segment.start)
-        identity = identity_map.get(segment.speaker)
-        name = identity.name if identity else segment.speaker
-        speaker = _wikify(name) if identity and name != segment.speaker else name
-        lines.append(f"**{timestamp:%H:%M:%S}** {speaker}: {segment.text.strip()}")
+    for turn in _merge_speaker_turns(segments):
+        timestamp = job.meeting_info.start_time + timedelta(seconds=turn.start)
+        identity = identity_map.get(turn.speaker)
+        name = identity.name if identity else turn.speaker
+        speaker = _wikify(name) if identity and name != turn.speaker else name
+        lines.append(f"**{timestamp:%H:%M:%S}** {speaker}: {turn.text.strip()}")
         lines.append("")
     return "\n".join(lines).rstrip()
+
+
+def _merge_speaker_turns(segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
+    turns: list[TranscriptSegment] = []
+    for segment in segments:
+        text = segment.text.strip()
+        if not text:
+            continue
+        if turns and turns[-1].speaker == segment.speaker:
+            turns[-1].end = segment.end
+            turns[-1].text = f"{turns[-1].text} {text}".strip()
+            continue
+        turns.append(
+            TranscriptSegment(
+                start=segment.start,
+                end=segment.end,
+                text=text,
+                speaker=segment.speaker,
+                confidence=segment.confidence,
+            )
+        )
+    return turns
 
 
 def _relative_audio_paths(paths: list[Path], config: AppConfig) -> list[str]:

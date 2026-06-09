@@ -9,6 +9,7 @@ from mt_linux.models import CalendarEvent
 def replace_speaker_label(path: Path, speaker_label: str, speaker_name: str) -> None:
     content = path.read_text(encoding="utf-8")
     wikified = f"[[{speaker_name}]]"
+    content = content.replace(f"[[{speaker_label}]]", wikified)
     content = content.replace(speaker_label, wikified)
     content = re.sub(
         rf'(name:\s*"{re.escape(wikified)}"\n\s*confidence:\s*)"unidentified"',
@@ -58,12 +59,13 @@ def clear_meeting_assignment(
     path: Path,
     candidates: list[CalendarEvent],
     reason: str = "external",
+    title: str = "Ad Hoc Meeting",
 ) -> None:
     content = path.read_text(encoding="utf-8")
     content = _replace_scalar(content, "calendar_event_id", "")
     content = _replace_scalar(content, "calendar_match_confidence", reason)
     content = _replace_scalar(content, "calendar_review_queued", "false", quoted=False)
-    content = _replace_scalar(content, "title", "Ad Hoc Meeting")
+    content = _replace_scalar(content, "title", title)
     content = _replace_scalar(content, "organizer", "")
     content = _replace_scalar(content, "duration_minutes", "0", quoted=False)
     content = _replace_block(

@@ -42,3 +42,38 @@ def test_render_meeting_markdown_contains_frontmatter_and_transcript(tmp_path: P
     assert 'title: "Weekly Standup"' in rendered.content
     assert "[[James Tomasino]]" in rendered.content
     assert "**14:30:05**" in rendered.content
+
+
+def test_render_meeting_markdown_merges_consecutive_segments_from_same_speaker(tmp_path: Path):
+    config = AppConfig()
+    config.output.folder = str(tmp_path)
+    meeting_info = MeetingInfo(
+        app="zoom",
+        pid=1,
+        detection_method="import",
+        start_time=datetime(2026, 6, 7, 14, 30),
+        title="Weekly Standup",
+    )
+    job = PipelineJob(
+        session_id="session-2",
+        app_audio_path=tmp_path / "app.wav",
+        mic_audio_path=tmp_path / "mic.wav",
+        meeting_info=meeting_info,
+    )
+    rendered = render_meeting_markdown(
+        job,
+        config,
+        transcript_segments=[
+            TranscriptSegment(start=5, end=7, text="Hello", speaker="SPEAKER_00"),
+            TranscriptSegment(start=7, end=9, text="there again", speaker="SPEAKER_00"),
+            TranscriptSegment(start=9, end=11, text="Reply", speaker="SPEAKER_01"),
+        ],
+        identities=[
+            SpeakerIdentity(label="SPEAKER_00", name="James Tomasino", confidence="mic_track"),
+            SpeakerIdentity(label="SPEAKER_01", name="Alice Smith", confidence="voice_profile"),
+        ],
+        summary="Short summary",
+    )
+    assert "**14:30:05** [[James Tomasino]]: Hello there again" in rendered.content
+    assert rendered.content.count("[[James Tomasino]]:") == 1
+    assert "**14:30:09** [[Alice Smith]]: Reply" in rendered.content

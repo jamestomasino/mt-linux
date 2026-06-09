@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import uuid
@@ -21,7 +22,8 @@ from mt_linux.detection.google_auth import run_google_auth
 from mt_linux.diarization.speaker_matcher import SpeakerMatcher
 from mt_linux.doctor import run_doctor, summarize_results
 from mt_linux.models import Attendee, CalendarEvent, MeetingInfo
-from mt_linux.output.markdown import output_path_for
+from mt_linux.output.markdown import output_path_for, slugify
+from mt_linux.output.protocol_refresh import refresh_summary_from_transcript
 from mt_linux.output.transcript_patch import (
     apply_meeting_assignment,
     clear_meeting_assignment,
@@ -301,6 +303,8 @@ def review_list() -> None:
 @review.command("run")
 @click.option("--session", "session_id", default="")
 def review_run(session_id: str) -> None:
+    current = AppConfig.load()
+    store = JobSnapshotStore()
     queue = ReviewQueue()
     entries = queue.load()
     if session_id:
@@ -308,7 +312,9 @@ def review_run(session_id: str) -> None:
     if not entries:
         click.echo("No review entries found.")
         return
+    changed_sessions: set[str] = set()
     for entry in entries:
+        original_transcript_path = entry.transcript_path
         click.echo(f"Meeting: {entry.meeting_title or 'Untitled'} ({entry.meeting_date.isoformat()})")
         click.echo(f"Speaker: {entry.speaker_label}")
         _play_sample(entry.sample_path)
@@ -319,7 +325,10 @@ def review_run(session_id: str) -> None:
         queue.remove(entry.session_id, entry.speaker_label)
         if entry.sample_path.exists():
             entry.sample_path.unlink()
+        changed_sessions.add(entry.session_id)
         click.echo(f"Identified as {choice}")
+    for changed_session in sorted(changed_sessions):
+        _refresh_job_summary(store, current, changed_session)
 
 
 @cli.group("review-meetings", invoke_without_command=True)
@@ -352,6 +361,7 @@ def review_meetings_run(session_id: str) -> None:
         click.echo("No meeting review entries found.")
         return
     for entry in entries:
+        original_transcript_path = entry.transcript_path
         click.echo(f"Meeting: {entry.meeting_title or 'Untitled'} ({entry.meeting_date.isoformat()})")
         click.echo(
             f"Detected: app={entry.app or 'unknown'} "
@@ -372,35 +382,109 @@ def review_meetings_run(session_id: str) -> None:
             )
             if candidate.attendees:
                 click.echo(f"   attendees: {', '.join(attendee.display() for attendee in candidate.attendees[:5])}")
-        click.echo("n) None of these / ad-hoc meeting")
-        raw_choice = click.prompt("Select event number, n, or blank to skip", default="", show_default=False)
-        if not raw_choice:
+        outcome = _prompt_meeting_assignment(
+            entry.candidates,
+            current_title=entry.meeting_title or "Ad Hoc Meeting",
+        )
+        if outcome is None:
             continue
-        if raw_choice.lower() == "n":
+        if outcome["kind"] == "external":
             clear_meeting_assignment(
-                entry.transcript_path,
+                original_transcript_path,
                 candidates=entry.candidates,
                 reason="external",
+                title=outcome["title"],
             )
+            renamed_path = _rename_transcript_path_for_title(original_transcript_path, outcome["title"])
+            _update_meeting_review_entry_paths(queue, entry.session_id, renamed_path)
             queue.remove(entry.session_id)
             click.echo("Marked as non-calendar / ad-hoc meeting")
             continue
-        if not raw_choice.isdigit():
-            click.echo("Invalid choice; expected an event number, n, or blank.")
-            continue
-        choice_index = int(raw_choice) - 1
-        if choice_index < 0 or choice_index >= len(entry.candidates):
-            click.echo("Invalid choice; event number is out of range.")
-            continue
-        candidate = entry.candidates[choice_index]
+        candidate = outcome["candidate"]
         apply_meeting_assignment(
-            entry.transcript_path,
+            original_transcript_path,
             selected_event=candidate,
             candidates=entry.candidates,
             ambiguous=False,
         )
+        _rename_transcript_path_for_title(original_transcript_path, candidate.title)
         queue.remove(entry.session_id)
         click.echo(f"Assigned to {candidate.title}")
+
+
+@review_meetings.command("recent")
+@click.option("--limit", default=10, show_default=True)
+def review_meetings_recent(limit: int) -> None:
+    store = JobSnapshotStore()
+    config = AppConfig.load()
+    jobs = sorted(store.load_all(), key=lambda job: job.created_at, reverse=True)[:limit]
+    if not jobs:
+        click.echo("No recent meetings found.")
+        return
+    for index, job in enumerate(jobs, start=1):
+        candidate_count = len(job.meeting_info.calendar_candidates)
+        click.echo(
+            f"{index}) {job.meeting_info.title or job.meeting_info.app} "
+            f"[{job.status.value}] ({candidate_count} matches)"
+        )
+    raw_choice = click.prompt("Select meeting number or blank to skip", default="", show_default=False)
+    if not raw_choice:
+        return
+    if not raw_choice.isdigit():
+        raise click.ClickException("Invalid choice; expected a meeting number or blank.")
+    job_index = int(raw_choice) - 1
+    if job_index < 0 or job_index >= len(jobs):
+        raise click.ClickException("Invalid choice; meeting number is out of range.")
+    job = jobs[job_index]
+    click.echo(f"Meeting: {job.meeting_info.title or 'Untitled'} ({job.meeting_info.start_time.date().isoformat()})")
+    click.echo(
+        f"Detected: app={job.meeting_info.app or 'unknown'} "
+        f"start={job.meeting_info.start_time.isoformat()} "
+        f"status={job.status.value}"
+    )
+    for index, candidate in enumerate(job.meeting_info.calendar_candidates, start=1):
+        click.echo(
+            f"{index}) {candidate.title} "
+            f"{format_candidate_summary(candidate, job.meeting_info.start_time)}"
+        )
+        if candidate.attendees:
+            click.echo(f"   attendees: {', '.join(attendee.display() for attendee in candidate.attendees[:5])}")
+    outcome = _prompt_meeting_assignment(
+        job.meeting_info.calendar_candidates,
+        current_title=job.meeting_info.title or "Ad Hoc Meeting",
+    )
+    if outcome is None:
+        return
+    transcript_path = output_path_for(job, config)
+    if outcome["kind"] == "external":
+        _clear_job_meeting_assignment(job, title=outcome["title"])
+        store.save(job)
+        new_transcript_path = output_path_for(job, config)
+        if transcript_path.exists():
+            clear_meeting_assignment(
+                transcript_path,
+                candidates=job.meeting_info.calendar_candidates,
+                reason="external",
+                title=outcome["title"],
+            )
+            if new_transcript_path != transcript_path:
+                new_transcript_path = _rename_transcript_path_for_title(transcript_path, outcome["title"])
+        click.echo("Marked as non-calendar / ad-hoc meeting")
+        return
+    candidate = outcome["candidate"]
+    _apply_job_meeting_assignment(job, candidate)
+    store.save(job)
+    new_transcript_path = output_path_for(job, config)
+    if transcript_path.exists():
+        apply_meeting_assignment(
+            transcript_path,
+            selected_event=candidate,
+            candidates=job.meeting_info.calendar_candidates,
+            ambiguous=False,
+        )
+        if new_transcript_path != transcript_path:
+            _rename_transcript_path_for_title(transcript_path, candidate.title)
+    click.echo(f"Assigned to {candidate.title}")
 
 
 @cli.command("import")
@@ -474,3 +558,103 @@ def _play_sample(path: Path) -> None:
     player = shutil.which("paplay") or shutil.which("aplay")
     if player:
         subprocess.run([player, str(path)], check=False)
+
+
+def _refresh_job_summary(store: JobSnapshotStore, config: AppConfig, session_id: str) -> bool:
+    job = store.load_one(session_id)
+    if job is None:
+        return False
+    transcript_path = output_path_for(job, config)
+    if not transcript_path.exists():
+        return False
+    refreshed = _refresh_summary_for_job(store, job, transcript_path, config)
+    if refreshed:
+        click.echo(f"Refreshed summary for {job.meeting_info.title or session_id}")
+    return refreshed
+
+
+def _refresh_summary_for_job(
+    store: JobSnapshotStore,
+    job: PipelineJob,
+    transcript_path: Path,
+    config: AppConfig,
+) -> bool:
+    refreshed = refresh_summary_from_transcript(transcript_path, config, job.meeting_info)
+    if refreshed:
+        job.summary = _read_summary_section(transcript_path)
+        store.save(job)
+    return refreshed
+
+
+def _read_summary_section(path: Path) -> str:
+    content = path.read_text(encoding="utf-8")
+    match = re.search(r"## Summary\n\n(.*?)\n\n---\n", content, flags=re.S)
+    return match.group(1).strip() if match else ""
+
+
+def _prompt_meeting_assignment(candidates: list[CalendarEvent], current_title: str) -> dict | None:
+    click.echo("n) None of these / ad-hoc meeting")
+    raw_choice = click.prompt("Select event number, n, or blank to skip", default="", show_default=False)
+    if not raw_choice:
+        return None
+    if raw_choice.lower() == "n":
+        manual_title = click.prompt(
+            f'Manual title (leave blank for "{current_title}")',
+            default="",
+            show_default=False,
+        )
+        return {
+            "kind": "external",
+            "title": manual_title or current_title,
+        }
+    if not raw_choice.isdigit():
+        click.echo("Invalid choice; expected an event number, n, or blank.")
+        return None
+    choice_index = int(raw_choice) - 1
+    if choice_index < 0 or choice_index >= len(candidates):
+        click.echo("Invalid choice; event number is out of range.")
+        return None
+    return {
+        "kind": "candidate",
+        "candidate": candidates[choice_index],
+    }
+
+
+def _clear_job_meeting_assignment(job: PipelineJob, title: str) -> None:
+    job.meeting_info.title = title
+    job.meeting_info.calendar_event = None
+    job.meeting_info.calendar_match_confidence = "external"
+    job.meeting_info.calendar_review_queued = False
+
+
+def _apply_job_meeting_assignment(job: PipelineJob, candidate: CalendarEvent) -> None:
+    job.meeting_info.title = candidate.title
+    job.meeting_info.calendar_event = candidate
+    job.meeting_info.calendar_match_confidence = "matched"
+    job.meeting_info.calendar_review_queued = False
+
+
+def _rename_transcript_path_for_title(path: Path, title: str) -> Path:
+    if not path.exists():
+        return path
+    parts = path.name.split("_", 2)
+    if len(parts) != 3:
+        return path
+    new_name = f"{parts[0]}_{parts[1]}_{slugify(title)}.md"
+    new_path = path.with_name(new_name)
+    if new_path == path:
+        return path
+    path.rename(new_path)
+    return new_path
+
+
+def _update_meeting_review_entry_paths(queue: MeetingReviewQueue, session_id: str, transcript_path: Path) -> None:
+    entries = queue.load()
+    changed = False
+    for entry in entries:
+        if entry.session_id != session_id:
+            continue
+        entry.transcript_path = transcript_path
+        changed = True
+    if changed:
+        queue.save(entries)

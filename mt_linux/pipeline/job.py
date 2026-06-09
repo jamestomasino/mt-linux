@@ -34,6 +34,8 @@ class PipelineJob:
     error: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     transcript_segments: list[TranscriptSegment] | None = None
+    app_transcript_segments: list[TranscriptSegment] | None = None
+    mic_transcript_segments: list[TranscriptSegment] | None = None
     diarization_segments: list[DiarizationSegment] | None = None
     summary: str | None = None
 
@@ -57,6 +59,12 @@ class PipelineJob:
             "created_at": self.created_at.isoformat(),
             "transcript_segments": [asdict(segment) for segment in self.transcript_segments]
             if self.transcript_segments is not None
+            else None,
+            "app_transcript_segments": [asdict(segment) for segment in self.app_transcript_segments]
+            if self.app_transcript_segments is not None
+            else None,
+            "mic_transcript_segments": [asdict(segment) for segment in self.mic_transcript_segments]
+            if self.mic_transcript_segments is not None
             else None,
             "diarization_segments": [asdict(segment) for segment in self.diarization_segments]
             if self.diarization_segments is not None
@@ -122,6 +130,16 @@ class PipelineJob:
                 TranscriptSegment(**item) for item in data["transcript_segments"]
             ]
             if data.get("transcript_segments") is not None
+            else None,
+            app_transcript_segments=[
+                TranscriptSegment(**item) for item in data["app_transcript_segments"]
+            ]
+            if data.get("app_transcript_segments") is not None
+            else None,
+            mic_transcript_segments=[
+                TranscriptSegment(**item) for item in data["mic_transcript_segments"]
+            ]
+            if data.get("mic_transcript_segments") is not None
             else None,
             diarization_segments=[
                 DiarizationSegment(**item) for item in data["diarization_segments"]
