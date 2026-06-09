@@ -313,6 +313,7 @@ def review_run(session_id: str) -> None:
         click.echo("No review entries found.")
         return
     changed_sessions: set[str] = set()
+    changed_entries: dict[str, list[ReviewEntry]] = {}
     for entry in entries:
         original_transcript_path = entry.transcript_path
         click.echo(f"Meeting: {entry.meeting_title or 'Untitled'} ({entry.meeting_date.isoformat()})")
@@ -326,9 +327,18 @@ def review_run(session_id: str) -> None:
         if entry.sample_path.exists():
             entry.sample_path.unlink()
         changed_sessions.add(entry.session_id)
+        changed_entries.setdefault(entry.session_id, []).append(entry)
         click.echo(f"Identified as {choice}")
     for changed_session in sorted(changed_sessions):
-        _refresh_job_summary(store, current, changed_session)
+        if _refresh_job_summary(store, current, changed_session):
+            continue
+        fallback_entry = changed_entries[changed_session][0]
+        if _refresh_summary_for_path(
+            fallback_entry.transcript_path,
+            current,
+            fallback_entry.meeting_title or "Meeting",
+        ):
+            click.echo(f"Refreshed summary for {fallback_entry.meeting_title or changed_session}")
 
 
 @cli.group("review-meetings", invoke_without_command=True)
@@ -571,6 +581,17 @@ def _refresh_job_summary(store: JobSnapshotStore, config: AppConfig, session_id:
     if refreshed:
         click.echo(f"Refreshed summary for {job.meeting_info.title or session_id}")
     return refreshed
+
+
+def _refresh_summary_for_path(path: Path, config: AppConfig, title: str) -> bool:
+    meeting_info = MeetingInfo(
+        app="manual",
+        pid=0,
+        detection_method="manual",
+        start_time=datetime.now(UTC),
+        title=title,
+    )
+    return refresh_summary_from_transcript(path, config, meeting_info)
 
 
 def _refresh_summary_for_job(

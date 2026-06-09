@@ -37,6 +37,47 @@ participants_identified:
     assert 'confidence: "voice_profile"' in content
 
 
+def test_replace_speaker_label_dedupes_metadata_when_multiple_labels_map_to_same_person(tmp_path: Path):
+    transcript = tmp_path / "meeting.md"
+    transcript.write_text(
+        """---
+participants:
+  - "[[SPEAKER_00]]"
+  - "[[SPEAKER_01]]"
+participants_identified:
+  - name: "SPEAKER_00"
+    confidence: "unidentified"
+    review_queued: true
+  - name: "SPEAKER_01"
+    confidence: "unidentified"
+    review_queued: true
+---
+
+## Participants
+
+| Speaker | Identity | Confidence |
+|---------|----------|------------|
+| SPEAKER_00 | SPEAKER_00 | unidentified |
+| SPEAKER_01 | SPEAKER_01 | unidentified |
+
+---
+
+## Transcript
+
+**14:30:00** SPEAKER_00: Hello
+
+**14:30:05** SPEAKER_01: Hi
+""",
+        encoding="utf-8",
+    )
+    replace_speaker_label(transcript, "SPEAKER_00", "Alice Smith")
+    replace_speaker_label(transcript, "SPEAKER_01", "Alice Smith")
+    content = transcript.read_text(encoding="utf-8")
+    assert content.count('  - "[[Alice Smith]]"') == 1
+    assert content.count('  - name: "[[Alice Smith]]"') == 1
+    assert content.count("| [[Alice Smith]] | [[Alice Smith]] |") == 1
+
+
 def test_apply_meeting_assignment_updates_calendar_frontmatter(tmp_path: Path):
     transcript = tmp_path / "meeting.md"
     transcript.write_text(
@@ -79,6 +120,16 @@ calendar_candidates:
                 attendees=[],
                 conferencing_type="zoom",
                 response_status="accepted",
+            ),
+            CalendarEvent(
+                event_id="event-2",
+                title="Other Meeting",
+                start_time=datetime(2026, 6, 7, 14, 31, tzinfo=UTC),
+                end_time=datetime(2026, 6, 7, 15, 0, tzinfo=UTC),
+                organizer="Bob Jones",
+                attendees=[],
+                conferencing_type="zoom",
+                response_status="tentative",
             )
         ],
         ambiguous=False,
@@ -88,6 +139,9 @@ calendar_candidates:
     assert 'calendar_review_queued: false' in content
     assert 'title: "Weekly Standup"' in content
     assert "duration_minutes: 30" in content
+    assert '  - "event-1"' in content
+    assert '  - "event-2"' not in content
+    assert 'title: "Other Meeting"' not in content
 
 
 def test_clear_meeting_assignment_marks_transcript_external(tmp_path: Path):
@@ -171,8 +225,58 @@ Old summary
     refreshed: list[str] = []
     monkeypatch.setattr("mt_linux.cli.ReviewQueue", lambda: queue)
     monkeypatch.setattr("mt_linux.cli._play_sample", lambda _path: None)
-    monkeypatch.setattr("mt_linux.cli._refresh_job_summary", lambda _store, _config, session_id: refreshed.append(session_id))
+    monkeypatch.setattr(
+        "mt_linux.cli._refresh_job_summary",
+        lambda _store, _config, session_id: refreshed.append(session_id) or True,
+    )
     runner = CliRunner()
     result = runner.invoke(cli, ["review", "run"], input="Alice Smith\n", env={})
     assert result.exit_code == 0
     assert refreshed == ["session-1"]
+
+
+def test_review_run_refreshes_summary_by_transcript_path_when_job_missing(tmp_path: Path, monkeypatch):
+    transcript = tmp_path / "meeting.md"
+    transcript.write_text(
+        """---
+title: "Meeting"
+---
+
+## Summary
+
+Old summary
+
+---
+
+## Transcript
+
+**14:30:00** SPEAKER_01: Hello there
+""",
+        encoding="utf-8",
+    )
+    sample = tmp_path / "sample.wav"
+    sample.write_bytes(b"wav")
+    queue = ReviewQueue(tmp_path / "review_queue.json")
+    queue.add(
+        ReviewEntry(
+            session_id="session-missing",
+            speaker_label="SPEAKER_01",
+            sample_path=sample,
+            calendar_attendees=[],
+            meeting_title="Meeting",
+            meeting_date=datetime(2026, 6, 9).date(),
+            transcript_path=transcript,
+        )
+    )
+    refreshed_paths: list[Path] = []
+    monkeypatch.setattr("mt_linux.cli.ReviewQueue", lambda: queue)
+    monkeypatch.setattr("mt_linux.cli._play_sample", lambda _path: None)
+    monkeypatch.setattr("mt_linux.cli._refresh_job_summary", lambda _store, _config, _session_id: False)
+    monkeypatch.setattr(
+        "mt_linux.cli._refresh_summary_for_path",
+        lambda path, _config, title: refreshed_paths.append(path) or True,
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["review", "run"], input="Alice Smith\n", env={})
+    assert result.exit_code == 0
+    assert refreshed_paths == [transcript]
