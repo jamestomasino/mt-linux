@@ -5,6 +5,19 @@ import subprocess
 import time
 
 
+def get_default_source_name() -> str:
+    result = subprocess.run(
+        ["pactl", "get-default-source"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    source_name = result.stdout.strip()
+    if result.returncode != 0 or not source_name:
+        raise RuntimeError("Could not determine default source from pactl")
+    return source_name
+
+
 def get_default_sink_name() -> str:
     result = subprocess.run(
         ["pactl", "get-default-sink"],
@@ -23,6 +36,13 @@ def get_system_capture_source_name(explicit_source_name: str = "") -> str:
     if source_name:
         return source_name
     return f"{get_default_sink_name()}.monitor"
+
+
+def get_mic_capture_source_name(explicit_source_name: str = "") -> str:
+    source_name = explicit_source_name.strip()
+    if source_name:
+        return source_name
+    return get_default_source_name()
 
 
 def get_preferred_system_capture_source_name(
@@ -77,3 +97,44 @@ def _pactl_json_list(kind: str) -> list[dict]:
     if isinstance(data, list):
         return data
     return []
+
+
+def get_source_output_index_for_pid(
+    process_id: int,
+    retries: int = 10,
+    retry_delay_seconds: float = 0.2,
+) -> int | None:
+    for attempt in range(max(retries, 1)):
+        for item in _pactl_json_list("source-outputs"):
+            props = item.get("properties", {})
+            if str(props.get("application.process.id", "")) == str(process_id):
+                return int(item.get("index"))
+        if attempt < retries - 1:
+            time.sleep(retry_delay_seconds)
+    return None
+
+
+def move_source_output(index: int, source_name: str) -> None:
+    subprocess.run(
+        ["pactl", "move-source-output", str(index), source_name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def bind_recording_process_to_source(
+    process_id: int,
+    source_name: str,
+    retries: int = 10,
+    retry_delay_seconds: float = 0.2,
+) -> bool:
+    index = get_source_output_index_for_pid(
+        process_id,
+        retries=retries,
+        retry_delay_seconds=retry_delay_seconds,
+    )
+    if index is None:
+        return False
+    move_source_output(index, source_name)
+    return True

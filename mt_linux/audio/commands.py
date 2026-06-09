@@ -5,7 +5,7 @@ import shutil
 
 
 def detect_recording_command() -> str | None:
-    for candidate in ("pw-record", "parecord"):
+    for candidate in ("parecord", "pw-record"):
         if shutil.which(candidate):
             return candidate
     return None

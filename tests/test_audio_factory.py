@@ -4,7 +4,7 @@ from mt_linux.config import AudioConfig
 
 
 def test_audio_factory_uses_pipewire_recorder_when_command_exists(monkeypatch):
-    monkeypatch.setattr("mt_linux.audio.factory.detect_recording_command", lambda: "pw-record")
+    monkeypatch.setattr("mt_linux.audio.factory.detect_recording_command", lambda: "parecord")
     recorder = create_session_recorder(AudioConfig())
     assert isinstance(recorder, PipeWireSessionRecorder)
 

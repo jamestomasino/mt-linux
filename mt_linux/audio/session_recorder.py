@@ -6,8 +6,12 @@ from pathlib import Path
 import wave
 
 from mt_linux.audio.capture import CaptureSession
-from mt_linux.audio.commands import build_default_mic_record_command, build_source_record_command
-from mt_linux.audio.pulse import get_preferred_system_capture_source_name
+from mt_linux.audio.commands import build_source_record_command
+from mt_linux.audio.pulse import (
+    bind_recording_process_to_source,
+    get_mic_capture_source_name,
+    get_preferred_system_capture_source_name,
+)
 from mt_linux.audio.processes import RecordingProcess, start_recording_process, stop_recording_process
 
 
@@ -19,6 +23,7 @@ class RecordingHandle:
 @dataclass
 class PipeWireRecordingHandle(RecordingHandle):
     system_source_name: str
+    mic_source_name: str
     app_process: RecordingProcess
     mic_process: RecordingProcess
 
@@ -70,23 +75,28 @@ class PipeWireSessionRecorder(SessionRecorder):
             app_pid,
             explicit_source_name=self.system_source_name,
         )
+        mic_source = get_mic_capture_source_name(self.mic_device_name)
         app_command = build_source_record_command(
             self.recorder_executable,
             monitor_source,
             session.app_audio_path,
             sample_rate=self.sample_rate,
         )
-        mic_command = build_default_mic_record_command(
+        mic_command = build_source_record_command(
             self.recorder_executable,
+            mic_source,
             session.mic_audio_path,
             sample_rate=self.sample_rate,
-            device_name=self.mic_device_name,
         )
         app_process = start_recording_process(app_command, session.app_audio_path, "app")
         mic_process = start_recording_process(mic_command, session.mic_audio_path, "mic")
+        if self.recorder_executable == "parecord":
+            bind_recording_process_to_source(app_process.process.pid, monitor_source)
+            bind_recording_process_to_source(mic_process.process.pid, mic_source)
         return PipeWireRecordingHandle(
             session=session,
             system_source_name=monitor_source,
+            mic_source_name=mic_source,
             app_process=app_process,
             mic_process=mic_process,
         )
