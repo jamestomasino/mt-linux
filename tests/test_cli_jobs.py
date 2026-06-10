@@ -55,3 +55,28 @@ def test_cli_jobs_cancel_removes_job_and_audio(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "Canceled session-2 and deleted 3 file(s)" in result.output
     assert store.load_one("session-2") is None
+
+
+def test_cli_jobs_log_shows_recent_history(tmp_path, monkeypatch):
+    store = JobSnapshotStore(tmp_path / "jobs")
+    job = PipelineJob(
+        session_id="session-3",
+        app_audio_path=tmp_path / "app.wav",
+        mic_audio_path=tmp_path / "mic.wav",
+        meeting_info=MeetingInfo(
+            app="zoom",
+            pid=1,
+            detection_method="pipewire",
+            start_time=datetime(2026, 6, 8, 12, 0),
+            title="Standup",
+        ),
+    )
+    job.add_event("Transcription started")
+    job.add_event("Summary refreshed after speaker review")
+    store.save(job)
+    monkeypatch.setattr("mt_linux.cli.JobSnapshotStore", lambda: store)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["jobs", "log", "session-3"])
+    assert result.exit_code == 0
+    assert "session-3  pending  Standup" in result.output
+    assert "Summary refreshed after speaker review" in result.output

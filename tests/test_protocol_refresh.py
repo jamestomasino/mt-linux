@@ -63,6 +63,17 @@ Old summary
     )
     config = AppConfig()
     config.protocol.enabled = True
+    entities = tmp_path / "entities.toml"
+    entities.write_text(
+        """
+[clients."Abbott"]
+aliases = ["abbott"]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    config.enrichment.enabled = True
+    config.enrichment.entity_catalog_path = str(entities)
     meeting_info = MeetingInfo(
         app="manual",
         pid=0,
@@ -75,13 +86,13 @@ Old summary
         assert "[[Syd Bizovi]]: Hello there" in prompt_text
         assert "[[James Tomasino]]: Sounds good" in prompt_text
         assert meeting.title == "Ops Huddle"
-        return "Updated summary"
+        return "Updated summary about Abbott"
 
     monkeypatch.setattr("mt_linux.output.protocol_refresh.OllamaProtocolGenerator.generate", _fake_generate)
 
     assert refresh_summary_from_transcript(transcript, config, meeting_info) is True
     content = transcript.read_text(encoding="utf-8")
-    assert "Updated summary" in content
+    assert "Updated summary about [[Abbott]]" in content
     assert "Old summary" not in content
 
 

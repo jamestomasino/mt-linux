@@ -22,6 +22,31 @@ def test_choose_calendar_event_ignores_non_conferencing_events():
     assert confidence == "none"
 
 
+def test_choose_calendar_event_surfaces_nonconference_candidates_for_review():
+    meeting = MeetingInfo(app="zoom", pid=1, detection_method="pipewire", start_time=datetime(2026, 6, 7, 14, 31, tzinfo=UTC))
+    chosen, candidates, confidence = choose_calendar_event(
+        meeting,
+        [
+            CalendarEvent(
+                event_id="home",
+                title="Home",
+                start_time=datetime(2026, 6, 7, 0, 0, tzinfo=UTC),
+                end_time=datetime(2026, 6, 8, 0, 0, tzinfo=UTC),
+            ),
+            CalendarEvent(
+                event_id="a",
+                title="James/Brandon-Weekly 1:1",
+                start_time=datetime(2026, 6, 7, 17, 0, tzinfo=UTC),
+                end_time=datetime(2026, 6, 7, 17, 30, tzinfo=UTC),
+                response_status="accepted",
+            ),
+        ],
+    )
+    assert chosen is None
+    assert confidence == "none"
+    assert [item.title for item in candidates] == ["James/Brandon-Weekly 1:1"]
+
+
 def test_choose_calendar_event_prefers_accepted_zoom_and_marks_ties_ambiguous():
     meeting = MeetingInfo(app="zoom", pid=1, detection_method="pipewire", start_time=datetime(2026, 6, 7, 14, 31, tzinfo=UTC))
     chosen, candidates, confidence = choose_calendar_event(

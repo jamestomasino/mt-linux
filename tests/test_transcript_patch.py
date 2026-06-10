@@ -1,6 +1,8 @@
 from pathlib import Path
 
+from mt_linux.config import AppConfig
 from mt_linux.models import CalendarEvent
+from mt_linux.models import MeetingInfo
 from datetime import UTC, datetime
 from click.testing import CliRunner
 
@@ -9,9 +11,12 @@ from mt_linux.models import ReviewEntry
 from mt_linux.output.transcript_patch import (
     apply_meeting_assignment,
     clear_meeting_assignment,
+    remove_speaker_label,
     replace_speaker_label,
 )
 from mt_linux.pipeline.review_queue import ReviewQueue
+from mt_linux.pipeline.snapshot import JobSnapshotStore
+from mt_linux.pipeline.job import JobStatus, PipelineJob
 
 
 def test_replace_speaker_label_updates_transcript_and_frontmatter(tmp_path: Path):
@@ -76,6 +81,48 @@ participants_identified:
     assert content.count('  - "[[Alice Smith]]"') == 1
     assert content.count('  - name: "[[Alice Smith]]"') == 1
     assert content.count("| [[Alice Smith]] | [[Alice Smith]] |") == 1
+
+
+def test_remove_speaker_label_strips_transcript_and_metadata(tmp_path: Path):
+    transcript = tmp_path / "meeting.md"
+    transcript.write_text(
+        """---
+participants:
+  - "[[SPEAKER_00]]"
+  - "[[SPEAKER_01]]"
+participants_identified:
+  - name: "SPEAKER_00"
+    confidence: "unidentified"
+    review_queued: true
+  - name: "SPEAKER_01"
+    confidence: "unidentified"
+    review_queued: true
+---
+
+## Participants
+
+| Speaker | Identity | Confidence |
+|---------|----------|------------|
+| SPEAKER_00 | SPEAKER_00 | unidentified |
+| SPEAKER_01 | SPEAKER_01 | unidentified |
+
+---
+
+## Transcript
+
+**14:30:00** SPEAKER_00: static hum
+
+**14:30:05** SPEAKER_01: Hello
+""",
+        encoding="utf-8",
+    )
+    remove_speaker_label(transcript, "SPEAKER_00")
+    content = transcript.read_text(encoding="utf-8")
+    assert '[[SPEAKER_00]]' not in content
+    assert 'name: "SPEAKER_00"' not in content
+    assert "| SPEAKER_00 |" not in content
+    assert "SPEAKER_00: static hum" not in content
+    assert "SPEAKER_01: Hello" in content
 
 
 def test_apply_meeting_assignment_updates_calendar_frontmatter(tmp_path: Path):
@@ -235,6 +282,69 @@ Old summary
     assert refreshed == ["session-1"]
 
 
+def test_review_run_can_remove_noise_entry(tmp_path: Path, monkeypatch):
+    transcript = tmp_path / "meeting.md"
+    transcript.write_text(
+        """---
+title: "Meeting"
+participants:
+  - "[[SPEAKER_01]]"
+participants_identified:
+  - name: "SPEAKER_01"
+    confidence: "unidentified"
+    review_queued: true
+---
+
+## Summary
+
+Old summary
+
+---
+
+## Participants
+
+| Speaker | Identity | Confidence |
+|---------|----------|------------|
+| SPEAKER_01 | SPEAKER_01 | unidentified |
+
+---
+
+## Transcript
+
+**14:30:00** SPEAKER_01: hiss
+""",
+        encoding="utf-8",
+    )
+    sample = tmp_path / "sample.wav"
+    sample.write_bytes(b"wav")
+    queue = ReviewQueue(tmp_path / "review_queue.json")
+    queue.add(
+        ReviewEntry(
+            session_id="session-1",
+            speaker_label="SPEAKER_01",
+            sample_path=sample,
+            calendar_attendees=[],
+            meeting_title="Meeting",
+            meeting_date=datetime(2026, 6, 9).date(),
+            transcript_path=transcript,
+        )
+    )
+    refreshed: list[str] = []
+    monkeypatch.setattr("mt_linux.cli.ReviewQueue", lambda: queue)
+    monkeypatch.setattr("mt_linux.cli._play_sample", lambda _path: None)
+    monkeypatch.setattr(
+        "mt_linux.cli._refresh_job_summary",
+        lambda _store, _config, session_id: refreshed.append(session_id) or True,
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["review", "run"], input="x\n", env={})
+    assert result.exit_code == 0
+    assert "Removed SPEAKER_01 as noise" in result.output
+    assert refreshed == ["session-1"]
+    content = transcript.read_text(encoding="utf-8")
+    assert "SPEAKER_01: hiss" not in content
+
+
 def test_review_run_refreshes_summary_by_transcript_path_when_job_missing(tmp_path: Path, monkeypatch):
     transcript = tmp_path / "meeting.md"
     transcript.write_text(
@@ -280,3 +390,48 @@ Old summary
     result = runner.invoke(cli, ["review", "run"], input="Alice Smith\n", env={})
     assert result.exit_code == 0
     assert refreshed_paths == [transcript]
+
+
+def test_refresh_summary_for_job_appends_history(tmp_path: Path, monkeypatch):
+    transcript = tmp_path / "meeting.md"
+    transcript.write_text(
+        """---
+title: "Meeting"
+---
+
+## Summary
+
+Updated summary
+
+---
+
+## Transcript
+
+**14:30:00** Alice Smith: Hello there
+""",
+        encoding="utf-8",
+    )
+    store = JobSnapshotStore(tmp_path / "jobs")
+    job = PipelineJob(
+        session_id="session-1",
+        app_audio_path=tmp_path / "app.wav",
+        mic_audio_path=tmp_path / "mic.wav",
+        meeting_info=MeetingInfo(
+            app="zoom",
+            pid=1,
+            detection_method="pipewire",
+            start_time=datetime(2026, 6, 9),
+            title="Meeting",
+        ),
+        status=JobStatus.COMPLETE,
+    )
+    store.save(job)
+    monkeypatch.setattr("mt_linux.cli.refresh_summary_from_transcript", lambda *_args, **_kwargs: True)
+    from mt_linux.cli import _refresh_summary_for_job
+
+    assert _refresh_summary_for_job(store, job, transcript, AppConfig()) is True
+    reloaded = store.load_one("session-1")
+    assert reloaded is not None
+    messages = [event.message for event in reloaded.history]
+    assert "Summary refresh requested after speaker review" in messages
+    assert "Summary refreshed after speaker review" in messages

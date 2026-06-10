@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
@@ -18,15 +19,20 @@ from mt_linux.config import AppConfig
 from mt_linux.control import build_request, wait_for_result, write_request
 from mt_linux.corpus import export_markdown_corpus
 from mt_linux.daemon import MeetingPipeline
+from mt_linux.detection.calendar_lookup import CalendarLookupService
 from mt_linux.detection.google_auth import run_google_auth
 from mt_linux.diarization.speaker_matcher import SpeakerMatcher
 from mt_linux.doctor import run_doctor, summarize_results
-from mt_linux.models import Attendee, CalendarEvent, MeetingInfo
+from mt_linux.enrichment.service import enrich_note, entity_notes_root, sync_entity_catalog
+from mt_linux.models import Attendee, CalendarEvent, MeetingInfo, MeetingReviewEntry
+from mt_linux.output.enrichment_patch import apply_note_enrichment
 from mt_linux.output.markdown import output_path_for, slugify
+from mt_linux.output.note_content import parse_note_content
 from mt_linux.output.protocol_refresh import refresh_summary_from_transcript
 from mt_linux.output.transcript_patch import (
     apply_meeting_assignment,
     clear_meeting_assignment,
+    remove_speaker_label,
     replace_speaker_label,
 )
 from mt_linux.paths import STATE_FILE, ensure_directories
@@ -139,6 +145,27 @@ def jobs_list() -> None:
         return
     for job in pending:
         click.echo(f"{job.session_id}  {job.status.value}  {job.meeting_info.title or job.meeting_info.app}")
+
+
+@jobs.command("log")
+@click.argument("session_id", required=False)
+@click.option("--limit", default=20, show_default=True, help="Limit displayed history entries.")
+def jobs_log(session_id: str | None, limit: int) -> None:
+    """Show job history."""
+    store = JobSnapshotStore()
+    job = store.load_one(session_id) if session_id else None
+    if job is None:
+        jobs = sorted(store.load_all(), key=lambda item: item.created_at, reverse=True)
+        if not jobs:
+            click.echo("No jobs found.")
+            return
+        if session_id:
+            raise click.ClickException(f"Job not found: {session_id}")
+        job = jobs[0]
+    click.echo(f"{job.session_id}  {job.status.value}  {job.meeting_info.title or job.meeting_info.app}")
+    history = job.history[-limit:]
+    for event in history:
+        click.echo(f"{event.at.isoformat()}  {event.status}  {event.message}")
 
 
 @jobs.command("cancel")
@@ -319,16 +346,21 @@ def review_run(session_id: str) -> None:
         click.echo(f"Meeting: {entry.meeting_title or 'Untitled'} ({entry.meeting_date.isoformat()})")
         click.echo(f"Speaker: {entry.speaker_label}")
         _play_sample(entry.sample_path)
-        choice = click.prompt("Name (leave empty to skip)", default="", show_default=False)
+        choice = click.prompt("Name, x to remove as noise, or blank to skip", default="", show_default=False)
         if not choice:
             continue
-        replace_speaker_label(entry.transcript_path, entry.speaker_label, choice)
+        if choice.lower() == "x":
+            remove_speaker_label(entry.transcript_path, entry.speaker_label)
+            action_message = f"Removed {entry.speaker_label} as noise"
+        else:
+            replace_speaker_label(entry.transcript_path, entry.speaker_label, choice)
+            action_message = f"Identified as {choice}"
         queue.remove(entry.session_id, entry.speaker_label)
         if entry.sample_path.exists():
             entry.sample_path.unlink()
         changed_sessions.add(entry.session_id)
         changed_entries.setdefault(entry.session_id, []).append(entry)
-        click.echo(f"Identified as {choice}")
+        click.echo(action_message)
     for changed_session in sorted(changed_sessions):
         if _refresh_job_summary(store, current, changed_session):
             continue
@@ -385,6 +417,8 @@ def review_meetings_run(session_id: str) -> None:
             click.echo("Transcript preview:")
             for line in preview:
                 click.echo(f"  {line}")
+        if not entry.candidates:
+            click.echo("No plausible calendar candidates were found.")
         for index, candidate in enumerate(entry.candidates, start=1):
             click.echo(
                 f"{index}) {candidate.title} "
@@ -497,6 +531,23 @@ def review_meetings_recent(limit: int) -> None:
     click.echo(f"Assigned to {candidate.title}")
 
 
+@review_meetings.command("recheck")
+@click.option("--session", "session_ids", multiple=True, help="Specific session IDs to recheck.")
+@click.option("--window", type=int, default=0, show_default=True, help="Override calendar lookup window in minutes.")
+def review_meetings_recheck(session_ids: tuple[str, ...], window: int) -> None:
+    current = AppConfig.load()
+    store = JobSnapshotStore()
+    queue = MeetingReviewQueue()
+    service = _calendar_lookup_service(current, window)
+    jobs = _select_meeting_recheck_jobs(store, queue, session_ids)
+    if not jobs:
+        click.echo("No meetings found to recheck.")
+        return
+    for job in jobs:
+        outcome = _recheck_job_calendar(store, queue, current, service, job)
+        click.echo(f"{job.session_id}: {outcome}")
+
+
 @cli.command("import")
 @click.argument("audio_file", type=click.Path(path_type=Path, exists=True))
 @click.option("--title", default="")
@@ -544,6 +595,39 @@ def export_corpus(format_name: str) -> None:
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(str(corpus_path))
+
+
+@cli.command("enrich-notes")
+@click.option("--limit", default=0, show_default=True, help="Limit the number of notes to process.")
+def enrich_notes(limit: int) -> None:
+    """Backfill note enrichment."""
+    current = AppConfig.load()
+    sync_entity_catalog(current)
+    output_dir = current.resolve_path(current.output.folder)
+    notes = sorted(output_dir.glob("*.md"))
+    processed = 0
+    for path in notes:
+        parsed = parse_note_content(path.read_text(encoding="utf-8"))
+        if not parsed.transcript:
+            continue
+        enrichment = enrich_note(parsed.summary, parsed.transcript, current)
+        apply_note_enrichment(path, enrichment, current)
+        processed += 1
+        click.echo(f"Enriched {path.name}")
+        if limit and processed >= limit:
+            break
+    if processed == 0:
+        click.echo("No transcript notes found.")
+
+
+@cli.command("sync-entities")
+def sync_entities() -> None:
+    """Generate entity catalog from vault notes."""
+    current = AppConfig.load()
+    target = sync_entity_catalog(current)
+    root = entity_notes_root(current)
+    click.echo(f"Entity notes: {root}")
+    click.echo(f"Catalog: {target}")
 
 
 @cli.group()
@@ -600,11 +684,136 @@ def _refresh_summary_for_job(
     transcript_path: Path,
     config: AppConfig,
 ) -> bool:
+    job.add_event("Summary refresh requested after speaker review")
+    store.save(job)
     refreshed = refresh_summary_from_transcript(transcript_path, config, job.meeting_info)
     if refreshed:
         job.summary = _read_summary_section(transcript_path)
+        job.add_event("Summary refreshed after speaker review")
         store.save(job)
     return refreshed
+
+
+def _calendar_lookup_service(config: AppConfig, window: int) -> CalendarLookupService:
+    lookup_config = deepcopy(config.calendar)
+    if window > 0:
+        lookup_config.lookup_window_minutes = window
+    return CalendarLookupService(lookup_config, config.openai)
+
+
+def _select_meeting_recheck_jobs(
+    store: JobSnapshotStore,
+    queue: MeetingReviewQueue,
+    session_ids: tuple[str, ...],
+) -> list[PipelineJob]:
+    if session_ids:
+        jobs: list[PipelineJob] = []
+        for session_id in session_ids:
+            job = store.load_one(session_id)
+            if job is not None:
+                jobs.append(job)
+        return jobs
+    queued_ids = {entry.session_id for entry in queue.load()}
+    jobs: list[PipelineJob] = []
+    for job in sorted(store.load_all(), key=lambda item: item.created_at, reverse=True):
+        title = (job.meeting_info.title or "").strip().lower()
+        app = job.meeting_info.app.strip().lower()
+        generic_unmatched = (
+            job.status == JobStatus.COMPLETE
+            and job.meeting_info.calendar_match_confidence == "none"
+            and title in {"", app}
+        )
+        if job.session_id in queued_ids or generic_unmatched:
+            jobs.append(job)
+    return jobs
+
+
+def _recheck_job_calendar(
+    store: JobSnapshotStore,
+    queue: MeetingReviewQueue,
+    config: AppConfig,
+    service: CalendarLookupService,
+    job: PipelineJob,
+) -> str:
+    transcript_path = output_path_for(job, config)
+    original_title = job.meeting_info.title
+    generic_title = not original_title or original_title.strip().lower() == job.meeting_info.app.strip().lower()
+    updated_info = deepcopy(job.meeting_info)
+    updated_info.calendar_event = None
+    updated_info.calendar_candidates = []
+    updated_info.calendar_match_confidence = "none"
+    updated_info.calendar_review_queued = False
+    if generic_title:
+        updated_info.title = None
+    updated_info = service.enrich(updated_info)
+    if job.summary:
+        updated_info = service.refine_with_summary(
+            updated_info,
+            job.summary,
+            window_minutes=max(window_override_or_default(service), 0),
+        )
+    if updated_info.calendar_match_confidence == "ambiguous" and generic_title:
+        updated_info.title = original_title
+    if updated_info.calendar_match_confidence == "none" and generic_title:
+        updated_info.title = original_title or job.meeting_info.app
+    job.meeting_info = updated_info
+    if updated_info.calendar_event and updated_info.calendar_match_confidence == "matched":
+        method_prefix = "OpenAI summary recheck" if updated_info.calendar_match_method == "openai_summary" else "Calendar recheck"
+        job.add_event(f"{method_prefix} matched '{updated_info.calendar_event.title}'")
+        store.save(job)
+        if transcript_path.exists():
+            apply_meeting_assignment(
+                transcript_path,
+                selected_event=updated_info.calendar_event,
+                candidates=updated_info.calendar_candidates or [updated_info.calendar_event],
+                ambiguous=False,
+            )
+            _rename_transcript_path_for_title(transcript_path, updated_info.calendar_event.title)
+        queue.remove(job.session_id)
+        return f"matched {updated_info.calendar_event.title}"
+    if updated_info.calendar_review_queued:
+        _queue_meeting_review_entry(queue, config, job)
+        candidate_count = len(updated_info.calendar_candidates)
+        if candidate_count:
+            method_prefix = "OpenAI summary recheck" if updated_info.calendar_match_method == "openai_summary" else "Calendar recheck"
+            job.add_event(f"{method_prefix} queued meeting review with {candidate_count} candidate(s)")
+        else:
+            method_prefix = "OpenAI summary recheck" if updated_info.calendar_match_method == "openai_summary" else "Calendar recheck"
+            job.add_event(f"{method_prefix} queued unmatched meeting review")
+        store.save(job)
+        return f"queued review ({candidate_count} candidates)"
+    queue.remove(job.session_id)
+    job.add_event("Calendar recheck found no candidates")
+    store.save(job)
+    return "no candidates found"
+
+
+def window_override_or_default(service: CalendarLookupService) -> int:
+    return service.config.lookup_window_minutes
+
+
+def _queue_meeting_review_entry(queue: MeetingReviewQueue, config: AppConfig, job: PipelineJob) -> None:
+    transcript_path = output_path_for(job, config)
+    audio_path = job.imported_audio_path or job.app_audio_path
+    queue.add(
+        MeetingReviewEntry(
+            session_id=job.session_id,
+            transcript_path=transcript_path,
+            selected_event_id=job.meeting_info.calendar_event.event_id if job.meeting_info.calendar_event else "",
+            candidates=job.meeting_info.calendar_candidates,
+            meeting_title=job.meeting_info.title,
+            meeting_date=job.meeting_info.start_time.date(),
+            app=job.meeting_info.app,
+            detected_start_time=job.meeting_info.start_time,
+            recording_duration_minutes=wav_duration_minutes(audio_path),
+            identified_speakers=sorted({identity.name for identity in (job.identities or []) if identity.name}),
+            transcript_preview=[
+                f"{segment.speaker}: {segment.text.strip()}"
+                for segment in (job.transcript_segments or [])[:5]
+                if segment.text.strip()
+            ],
+        )
+    )
 
 
 def _read_summary_section(path: Path) -> str:

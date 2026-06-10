@@ -23,6 +23,16 @@ def replace_speaker_label(path: Path, speaker_label: str, speaker_name: str) -> 
     path.write_text(content, encoding="utf-8")
 
 
+def remove_speaker_label(path: Path, speaker_label: str) -> None:
+    content = path.read_text(encoding="utf-8")
+    content = _remove_transcript_speaker_turns(content, speaker_label)
+    content = _remove_participant_line(content, f'  - "[[{speaker_label}]]"')
+    content = _remove_participants_identified_entry(content, speaker_label)
+    content = _remove_participants_table_row(content, speaker_label)
+    content = _collapse_excess_blank_lines(content)
+    path.write_text(content, encoding="utf-8")
+
+
 def apply_meeting_assignment(
     path: Path,
     selected_event: CalendarEvent,
@@ -200,3 +210,47 @@ def _merge_identity_entry(left: dict[str, str], right: dict[str, str]) -> dict[s
     else:
         merged.pop("review_queued", None)
     return merged
+
+
+def _remove_transcript_speaker_turns(content: str, speaker_label: str) -> str:
+    patterns = [
+        rf"^\*\*\d{{2}}:\d{{2}}:\d{{2}}\*\*\s+{re.escape(speaker_label)}:.*(?:\n\n|\n|$)",
+        rf"^\*\*\d{{2}}:\d{{2}}:\d{{2}}\*\*\s+\[\[{re.escape(speaker_label)}\]\]:.*(?:\n\n|\n|$)",
+    ]
+    updated = content
+    for pattern in patterns:
+        updated = re.sub(pattern, "", updated, flags=re.MULTILINE)
+    return updated
+
+
+def _remove_participant_line(content: str, line: str) -> str:
+    return content.replace(line + "\n", "")
+
+
+def _remove_participants_identified_entry(content: str, speaker_label: str) -> str:
+    pattern = (
+        rf'^  - name: "{re.escape(speaker_label)}"\n'
+        rf'(?:^    .*\n?)*'
+    )
+    pattern_wikified = (
+        rf'^  - name: "\[\[{re.escape(speaker_label)}\]\]"\n'
+        rf'(?:^    .*\n?)*'
+    )
+    updated = re.sub(pattern, "", content, flags=re.MULTILINE)
+    updated = re.sub(pattern_wikified, "", updated, flags=re.MULTILINE)
+    return updated
+
+
+def _remove_participants_table_row(content: str, speaker_label: str) -> str:
+    patterns = [
+        rf"^\| {re.escape(speaker_label)} \| .* \| .* \|\n?",
+        rf"^\| \[\[{re.escape(speaker_label)}\]\] \| .* \| .* \|\n?",
+    ]
+    updated = content
+    for pattern in patterns:
+        updated = re.sub(pattern, "", updated, flags=re.MULTILINE)
+    return updated
+
+
+def _collapse_excess_blank_lines(content: str) -> str:
+    return re.sub(r"\n{3,}", "\n\n", content)

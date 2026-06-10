@@ -13,9 +13,11 @@ from mt_linux.detection.meeting_detector import MeetingDetector
 from mt_linux.detection.start_gate import CalendarCoupledStartGate
 from mt_linux.diarization.diarizer import DiarizationSegment, PyannoteDiarizer
 from mt_linux.diarization.speaker_matcher import SpeakerMatcher
+from mt_linux.enrichment.service import enrich_note
+from mt_linux.models import SpeakerIdentity
 from mt_linux.models import TranscriptSegment
 from mt_linux.notifications import notify
-from mt_linux.output.markdown import render_meeting_markdown
+from mt_linux.output.markdown import output_path_for, render_meeting_markdown
 from mt_linux.paths import STATE_FILE, ensure_directories
 from mt_linux.pipeline.identity import assign_speakers_to_transcript, resolve_identities
 from mt_linux.pipeline.job import JobStatus, PipelineJob
@@ -49,7 +51,7 @@ class MeetingPipeline:
             raise FileNotFoundError(f"Audio file does not exist: {audio_path}")
         if job.transcript_segments is None:
             job.transcript_segments = await asyncio.to_thread(self._transcribe, job)
-            job.status = JobStatus.TRANSCRIBED
+            job.set_status(JobStatus.TRANSCRIBED, "Transcription complete")
             self.store.save(job)
             return
         if job.diarization_segments is None:
@@ -58,44 +60,47 @@ class MeetingPipeline:
             except Exception:
                 logging.exception("Diarization failed for %s", job.session_id)
                 job.diarization_segments = []
-            job.status = JobStatus.DIARIZED
+            job.set_status(JobStatus.DIARIZED, "Diarization complete")
             self.store.save(job)
             return
-        transcript_segments = self._assign_transcript_speakers(job)
+        if job.identities is None:
+            transcript_segments = self._assign_transcript_speakers(job)
+            job.transcript_segments = transcript_segments
+            job.identities = await asyncio.to_thread(self._resolve_identities, job, transcript_segments)
+            job.add_event("Speaker identities resolved")
+            self.store.save(job)
+            return
+        transcript_segments = self._assign_named_speakers(job)
         job.transcript_segments = transcript_segments
         if job.summary is None:
             job.summary = await asyncio.to_thread(self._generate_protocol, job, transcript_segments)
+            refined = await asyncio.to_thread(self._refine_calendar_match, job)
+            if refined:
+                job.add_event(refined)
+            job.add_event("Protocol summary generated")
+            self.store.save(job)
+            return
+        if job.enrichment is None:
+            transcript_text = "\n".join(f"{segment.speaker}: {segment.text}" for segment in transcript_segments if segment.text.strip())
+            job.enrichment = await asyncio.to_thread(enrich_note, job.summary or "", transcript_text, self.config)
+            job.add_event("Note enrichment generated")
+            self.store.save(job)
+            return
         rendered = render_meeting_markdown(
             job,
             self.config,
             transcript_segments=transcript_segments,
-            identities=[],
+            identities=job.identities or [],
             summary=job.summary or "",
+            enrichment=job.enrichment,
         )
-        identities = resolve_identities(
-            self.config,
-            transcript_segments,
-            job.diarization_segments,
-            transcript_path=rendered.path,
-            review_queue=self.review_queue,
-            job=job,
-            source_audio_path=self._identity_audio_path(job),
-            speaker_matcher=self._get_speaker_matcher(),
-        )
-        rendered = render_meeting_markdown(
-            job,
-            self.config,
-            transcript_segments=transcript_segments,
-            identities=identities,
-            summary=job.summary or "",
-        )
-        job.status = JobStatus.WRITING_OUTPUT
+        job.set_status(JobStatus.WRITING_OUTPUT, "Writing markdown output")
         self.store.save(job)
         rendered.path.write_text(rendered.content, encoding="utf-8")
-        job.status = JobStatus.COMPLETE
+        job.set_status(JobStatus.COMPLETE, "Processing complete")
         self.store.save(job)
-        self._queue_meeting_review(job, rendered.path, transcript_segments, identities)
-        if any(identity.review_queued for identity in identities):
+        self._queue_meeting_review(job, rendered.path, transcript_segments, job.identities or [])
+        if any(identity.review_queued for identity in (job.identities or [])):
             notify(
                 "Meeting Transcriber",
                 f"Unidentified speakers in '{job.meeting_info.title or job.meeting_info.app}'. Run mt-ctl review.",
@@ -107,7 +112,7 @@ class MeetingPipeline:
             )
 
     def _transcribe(self, job: PipelineJob) -> list[TranscriptSegment]:
-        job.status = JobStatus.TRANSCRIBING
+        job.set_status(JobStatus.TRANSCRIBING, "Transcription started")
         self.store.save(job)
         if self.config.transcription.engine != "faster-whisper":
             return []
@@ -138,7 +143,7 @@ class MeetingPipeline:
         return merge_track_segments(job.mic_transcript_segments, job.app_transcript_segments)
 
     def _diarize(self, job: PipelineJob) -> list[DiarizationSegment]:
-        job.status = JobStatus.DIARIZING
+        job.set_status(JobStatus.DIARIZING, "Diarization started")
         self.store.save(job)
         if not self.config.diarization.enabled or not self.config.diarization.hf_token:
             return []
@@ -150,7 +155,7 @@ class MeetingPipeline:
         return diarizer.diarize(audio_path)
 
     def _generate_protocol(self, job: PipelineJob, segments: list[TranscriptSegment]) -> str:
-        job.status = JobStatus.GENERATING_PROTOCOL
+        job.set_status(JobStatus.GENERATING_PROTOCOL, "Protocol generation started")
         self.store.save(job)
         if not self.config.protocol.enabled:
             return ""
@@ -164,6 +169,38 @@ class MeetingPipeline:
             logging.exception("Protocol generation failed for %s", job.session_id)
             return ""
 
+    def _refine_calendar_match(self, job: PipelineJob) -> str:
+        if not job.summary or not self.config.openai.enabled:
+            return ""
+        if job.meeting_info.calendar_match_confidence == "matched":
+            return ""
+        service = CalendarLookupService(self.config.calendar, self.config.openai)
+        previous_title = job.meeting_info.title
+        previous_event_id = job.meeting_info.calendar_event.event_id if job.meeting_info.calendar_event else ""
+        previous_confidence = job.meeting_info.calendar_match_confidence
+        generic_title = not previous_title or previous_title.strip().lower() == job.meeting_info.app.strip().lower()
+        info = job.meeting_info
+        if generic_title:
+            info.title = None
+        updated = service.refine_with_summary(info, job.summary)
+        if updated.calendar_match_confidence == "matched" and updated.calendar_event:
+            if generic_title:
+                updated.title = updated.calendar_event.title
+            if (
+                updated.calendar_event.event_id != previous_event_id
+                or updated.calendar_match_confidence != previous_confidence
+            ):
+                return f"OpenAI summary match selected '{updated.calendar_event.title}'"
+            return ""
+        if updated.calendar_review_queued and (
+            updated.calendar_match_method == "openai_summary"
+            or updated.calendar_match_confidence != previous_confidence
+        ):
+            if updated.calendar_candidates:
+                return f"OpenAI summary match queued review with {len(updated.calendar_candidates)} candidate(s)"
+            return "OpenAI summary match queued review"
+        return ""
+
     def _get_speaker_matcher(self) -> SpeakerMatcher:
         if self._speaker_matcher is None:
             self._speaker_matcher = SpeakerMatcher(
@@ -173,7 +210,7 @@ class MeetingPipeline:
         return self._speaker_matcher
 
     def _queue_meeting_review(self, job: PipelineJob, transcript_path, transcript_segments, identities) -> None:
-        if not job.meeting_info.calendar_review_queued or not job.meeting_info.calendar_candidates:
+        if not job.meeting_info.calendar_review_queued:
             return
         from mt_linux.models import MeetingReviewEntry
 
@@ -229,6 +266,36 @@ class MeetingPipeline:
             job.transcript_segments or [],
             job.diarization_segments,
         )
+
+    def _resolve_identities(self, job: PipelineJob, transcript_segments: list[TranscriptSegment]) -> list[SpeakerIdentity]:
+        transcript_path = output_path_for(job, self.config)
+        return resolve_identities(
+            self.config,
+            transcript_segments,
+            job.diarization_segments or [],
+            transcript_path=transcript_path,
+            review_queue=self.review_queue,
+            job=job,
+            source_audio_path=self._identity_audio_path(job),
+            speaker_matcher=self._get_speaker_matcher(),
+        )
+
+    def _assign_named_speakers(self, job: PipelineJob) -> list[TranscriptSegment]:
+        assigned = self._assign_transcript_speakers(job)
+        identity_map = {identity.label: identity.name for identity in (job.identities or [])}
+        normalized: list[TranscriptSegment] = []
+        for segment in assigned:
+            normalized.append(
+                TranscriptSegment(
+                    start=segment.start,
+                    end=segment.end,
+                    text=segment.text,
+                    speaker=identity_map.get(segment.speaker, segment.speaker),
+                    confidence=segment.confidence,
+                    track=segment.track,
+                )
+            )
+        return normalized
 
 
 class DaemonState:

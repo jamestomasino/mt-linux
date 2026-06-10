@@ -130,6 +130,54 @@ calendar_candidates:
     assert len(queue.load()) == 1
 
 
+def test_review_meetings_handles_unmatched_session_without_candidates(tmp_path: Path, monkeypatch):
+    transcript = tmp_path / "meeting.md"
+    transcript.write_text(
+        """---
+title: "zoom"
+calendar_event_id: ""
+calendar_match_confidence: "none"
+calendar_review_queued: true
+calendar_candidate_event_ids:
+  - ""
+calendar_attendees:
+  - ""
+calendar_candidates:
+  - id: ""
+---
+""",
+        encoding="utf-8",
+    )
+    queue = MeetingReviewQueue(tmp_path / "meeting_review_queue.json")
+    monkeypatch.setattr("mt_linux.cli.MeetingReviewQueue", lambda: queue)
+    queue.add(
+        MeetingReviewEntry(
+            session_id="session-2",
+            transcript_path=transcript,
+            selected_event_id="",
+            candidates=[],
+            meeting_title="zoom",
+            meeting_date=date(2026, 6, 7),
+            app="zoom",
+            detected_start_time=datetime(2026, 6, 7, 14, 31, tzinfo=UTC),
+            recording_duration_minutes=45,
+            identified_speakers=["Alice Smith"],
+            transcript_preview=["Alice Smith: hello there"],
+        )
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["review-meetings", "run"],
+        input="n\nWeekly Standup\n",
+        env={},
+    )
+    assert result.exit_code == 0
+    assert "No plausible calendar candidates were found." in result.output
+    assert "Marked as non-calendar / ad-hoc meeting" in result.output
+    assert queue.load() == []
+
+
 def test_review_meetings_recent_can_clear_pending_job_with_manual_title(tmp_path: Path, monkeypatch):
     store = JobSnapshotStore(tmp_path / "jobs")
     audio_path = write_test_wav(tmp_path / "audio" / "sample.wav", seconds=1)
@@ -245,3 +293,139 @@ calendar_candidates:
     assert not transcript.exists()
     renamed = tmp_path / "2026-06-09_13-50_ops-huddle.md"
     assert renamed.exists()
+
+
+def test_review_meetings_recheck_can_auto_match_generic_zoom_note(tmp_path: Path, monkeypatch):
+    store = JobSnapshotStore(tmp_path / "jobs")
+    transcript = tmp_path / "2026-06-09_17-41_zoom.md"
+    transcript.write_text(
+        """---
+title: "zoom"
+calendar_event_id: ""
+calendar_match_confidence: "none"
+calendar_review_queued: false
+calendar_candidate_event_ids:
+  - ""
+calendar_attendees:
+  - ""
+calendar_candidates:
+  - id: ""
+---
+""",
+        encoding="utf-8",
+    )
+    audio_path = write_test_wav(tmp_path / "audio" / "sample.wav", seconds=1)
+    job = PipelineJob(
+        session_id="session-recheck-1",
+        app_audio_path=audio_path,
+        mic_audio_path=audio_path,
+        meeting_info=MeetingInfo(
+            app="zoom",
+            pid=1,
+            detection_method="pipewire",
+            start_time=datetime(2026, 6, 9, 17, 41, tzinfo=UTC),
+            title="zoom",
+            calendar_match_confidence="none",
+        ),
+        status=JobStatus.COMPLETE,
+    )
+    store.save(job)
+    queue = MeetingReviewQueue(tmp_path / "meeting_review_queue.json")
+
+    class _FakeLookup:
+        def enrich(self, meeting_info):
+            meeting_info.calendar_event = CalendarEvent(
+                event_id="event-1",
+                title="Weekly Sync",
+                start_time=datetime(2026, 6, 9, 17, 30, tzinfo=UTC),
+                end_time=datetime(2026, 6, 9, 18, 0, tzinfo=UTC),
+                conferencing_type="zoom",
+                response_status="accepted",
+            )
+            meeting_info.calendar_candidates = [meeting_info.calendar_event]
+            meeting_info.calendar_match_confidence = "matched"
+            meeting_info.calendar_review_queued = False
+            meeting_info.title = "Weekly Sync"
+            return meeting_info
+
+    monkeypatch.setattr("mt_linux.cli.JobSnapshotStore", lambda: store)
+    monkeypatch.setattr("mt_linux.cli.MeetingReviewQueue", lambda: queue)
+    cfg = AppConfig()
+    cfg.output.folder = str(tmp_path)
+    monkeypatch.setattr("mt_linux.cli.AppConfig.load", lambda: cfg)
+    monkeypatch.setattr("mt_linux.cli._calendar_lookup_service", lambda _cfg, _window: _FakeLookup())
+    runner = CliRunner()
+    result = runner.invoke(cli, ["review-meetings", "recheck", "--session", "session-recheck-1"], env={})
+    assert result.exit_code == 0
+    assert "session-recheck-1: matched Weekly Sync" in result.output
+    updated = store.load_one("session-recheck-1")
+    assert updated is not None
+    assert updated.meeting_info.title == "Weekly Sync"
+    assert updated.meeting_info.calendar_event is not None
+    renamed = tmp_path / "2026-06-09_17-41_weekly-sync.md"
+    assert renamed.exists()
+    assert queue.load() == []
+
+
+def test_review_meetings_recheck_can_queue_unmatched_generic_zoom_note(tmp_path: Path, monkeypatch):
+    store = JobSnapshotStore(tmp_path / "jobs")
+    transcript = tmp_path / "2026-06-09_17-41_zoom.md"
+    transcript.write_text(
+        """---
+title: "zoom"
+calendar_event_id: ""
+calendar_match_confidence: "none"
+calendar_review_queued: false
+calendar_candidate_event_ids:
+  - ""
+calendar_attendees:
+  - ""
+calendar_candidates:
+  - id: ""
+---
+""",
+        encoding="utf-8",
+    )
+    audio_path = write_test_wav(tmp_path / "audio" / "sample.wav", seconds=1)
+    job = PipelineJob(
+        session_id="session-recheck-2",
+        app_audio_path=audio_path,
+        mic_audio_path=audio_path,
+        meeting_info=MeetingInfo(
+            app="zoom",
+            pid=1,
+            detection_method="pipewire",
+            start_time=datetime(2026, 6, 9, 17, 41, tzinfo=UTC),
+            title="zoom",
+            calendar_match_confidence="none",
+        ),
+        status=JobStatus.COMPLETE,
+    )
+    store.save(job)
+    queue = MeetingReviewQueue(tmp_path / "meeting_review_queue.json")
+
+    class _FakeLookup:
+        def enrich(self, meeting_info):
+            meeting_info.calendar_event = None
+            meeting_info.calendar_candidates = []
+            meeting_info.calendar_match_confidence = "none"
+            meeting_info.calendar_review_queued = True
+            meeting_info.title = "zoom"
+            return meeting_info
+
+    monkeypatch.setattr("mt_linux.cli.JobSnapshotStore", lambda: store)
+    monkeypatch.setattr("mt_linux.cli.MeetingReviewQueue", lambda: queue)
+    cfg = AppConfig()
+    cfg.output.folder = str(tmp_path)
+    monkeypatch.setattr("mt_linux.cli.AppConfig.load", lambda: cfg)
+    monkeypatch.setattr("mt_linux.cli._calendar_lookup_service", lambda _cfg, _window: _FakeLookup())
+    runner = CliRunner()
+    result = runner.invoke(cli, ["review-meetings", "recheck", "--session", "session-recheck-2"], env={})
+    assert result.exit_code == 0
+    assert "session-recheck-2: queued review (0 candidates)" in result.output
+    updated = store.load_one("session-recheck-2")
+    assert updated is not None
+    assert updated.meeting_info.calendar_review_queued is True
+    entries = queue.load()
+    assert len(entries) == 1
+    assert entries[0].session_id == "session-recheck-2"

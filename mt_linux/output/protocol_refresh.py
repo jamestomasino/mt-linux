@@ -4,6 +4,8 @@ from pathlib import Path
 import re
 
 from mt_linux.config import AppConfig
+from mt_linux.enrichment.entities import linkify_entity_mentions
+from mt_linux.enrichment.service import load_entity_catalog
 from mt_linux.models import MeetingInfo
 from mt_linux.protocol.ollama_generator import OllamaProtocolGenerator
 
@@ -27,6 +29,8 @@ def refresh_summary_from_transcript(
     summary = sanitize_summary_placeholders(generator.generate(transcript, meeting_info).strip())
     if not summary:
         return False
+    if config.enrichment.enabled:
+        summary = linkify_entity_mentions(summary, load_entity_catalog(config))
     updated = replace_summary_section(content, summary)
     path.write_text(updated, encoding="utf-8")
     return True

@@ -72,6 +72,21 @@ class ProtocolConfig:
 
 
 @dataclass
+class OpenAIConfig:
+    enabled: bool = False
+    api_key: str = ""
+    endpoint: str = "https://api.openai.com/v1/chat/completions"
+    model: str = ""
+
+
+@dataclass
+class EnrichmentConfig:
+    enabled: bool = True
+    entity_catalog_path: str = str(CONFIG_DIR / "entities.toml")
+    entity_notes_root: str = ""
+
+
+@dataclass
 class OutputConfig:
     folder: str = str(Path.home() / "Documents/meetings")
     vault_root: str = ""
@@ -89,6 +104,8 @@ class AppConfig:
     diarization: DiarizationConfig = field(default_factory=DiarizationConfig)
     speakers: SpeakersConfig = field(default_factory=SpeakersConfig)
     protocol: ProtocolConfig = field(default_factory=ProtocolConfig)
+    openai: OpenAIConfig = field(default_factory=OpenAIConfig)
+    enrichment: EnrichmentConfig = field(default_factory=EnrichmentConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
     @classmethod

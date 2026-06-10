@@ -9,6 +9,8 @@ from typing import Any
 from mt_linux.models import Attendee, CalendarEvent, MeetingInfo
 from mt_linux.diarization.diarizer import DiarizationSegment
 from mt_linux.models import TranscriptSegment
+from mt_linux.enrichment.models import NoteEnrichment
+from mt_linux.models import SpeakerIdentity
 
 
 class JobStatus(str, Enum):
@@ -21,6 +23,28 @@ class JobStatus(str, Enum):
     WRITING_OUTPUT = "writing_output"
     COMPLETE = "complete"
     FAILED = "failed"
+
+
+@dataclass
+class JobEvent:
+    at: datetime
+    status: str
+    message: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "at": self.at.isoformat(),
+            "status": self.status,
+            "message": self.message,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "JobEvent":
+        return cls(
+            at=datetime.fromisoformat(data["at"]),
+            status=data.get("status", ""),
+            message=data.get("message", ""),
+        )
 
 
 @dataclass
@@ -37,7 +61,33 @@ class PipelineJob:
     app_transcript_segments: list[TranscriptSegment] | None = None
     mic_transcript_segments: list[TranscriptSegment] | None = None
     diarization_segments: list[DiarizationSegment] | None = None
+    identities: list[SpeakerIdentity] | None = None
     summary: str | None = None
+    enrichment: NoteEnrichment | None = None
+    history: list[JobEvent] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.history:
+            self.history.append(
+                JobEvent(
+                    at=self.created_at,
+                    status=self.status.value,
+                    message="Job created",
+                )
+            )
+
+    def add_event(self, message: str, *, status: str | None = None, at: datetime | None = None) -> None:
+        self.history.append(
+            JobEvent(
+                at=at or datetime.now(UTC),
+                status=status or self.status.value,
+                message=message,
+            )
+        )
+
+    def set_status(self, status: JobStatus, message: str) -> None:
+        self.status = status
+        self.add_event(message, status=status.value)
 
     def to_dict(self) -> dict[str, Any]:
         meeting = asdict(self.meeting_info)
@@ -69,7 +119,12 @@ class PipelineJob:
             "diarization_segments": [asdict(segment) for segment in self.diarization_segments]
             if self.diarization_segments is not None
             else None,
+            "identities": [asdict(identity) for identity in self.identities]
+            if self.identities is not None
+            else None,
             "summary": self.summary,
+            "enrichment": self.enrichment.to_dict() if self.enrichment is not None else None,
+            "history": [event.to_dict() for event in self.history],
         }
 
     @classmethod
@@ -116,6 +171,8 @@ class PipelineJob:
             ],
             calendar_match_confidence=data["meeting_info"].get("calendar_match_confidence", "none"),
             calendar_review_queued=bool(data["meeting_info"].get("calendar_review_queued", False)),
+            calendar_match_method=data["meeting_info"].get("calendar_match_method", "deterministic"),
+            calendar_match_rationale=data["meeting_info"].get("calendar_match_rationale", ""),
         )
         return cls(
             session_id=data["session_id"],
@@ -146,5 +203,12 @@ class PipelineJob:
             ]
             if data.get("diarization_segments") is not None
             else None,
+            identities=[SpeakerIdentity(**item) for item in data["identities"]]
+            if data.get("identities") is not None
+            else None,
             summary=data.get("summary"),
+            enrichment=NoteEnrichment.from_dict(data["enrichment"])
+            if data.get("enrichment") is not None
+            else None,
+            history=[JobEvent.from_dict(item) for item in data.get("history", [])],
         )

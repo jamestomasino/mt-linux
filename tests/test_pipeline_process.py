@@ -338,7 +338,8 @@ def test_pipeline_process_resumes_after_transcription_without_rerunning_it(tmp_p
     assert job.status == JobStatus.DIARIZED
     assert job.diarization_segments == []
 
-    asyncio.run(pipeline.process(job))
+    while job.status != JobStatus.COMPLETE:
+        asyncio.run(pipeline.process(job))
     assert job.status == JobStatus.COMPLETE
     output_files = list((tmp_path / "out").glob("*.md"))
     assert len(output_files) == 1

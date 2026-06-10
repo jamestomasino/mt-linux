@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import re
 
 from mt_linux.config import AppConfig
+from mt_linux.enrichment.entities import EntityCatalog, linkify_entity_mentions
+from mt_linux.enrichment.service import load_entity_catalog
+from mt_linux.enrichment.models import NoteEnrichment
 from mt_linux.models import SpeakerIdentity, TranscriptSegment
 from mt_linux.pipeline.job import PipelineJob
 
@@ -34,24 +37,40 @@ def render_meeting_markdown(
     transcript_segments: list[TranscriptSegment],
     identities: list[SpeakerIdentity],
     summary: str = "",
-    decisions: str = "",
-    action_items: str = "",
+    enrichment: NoteEnrichment | None = None,
     transcription_confidence: float | None = None,
 ) -> RenderedMeeting:
     output_path = output_path_for(job, config)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog = load_entity_catalog(config) if config.enrichment.enabled else EntityCatalog()
     frontmatter = _frontmatter(
-        job, config, identities, transcription_confidence=transcription_confidence
+        job,
+        config,
+        identities,
+        enrichment=enrichment,
+        transcription_confidence=transcription_confidence,
     )
     participants_table = _participants_table(identities)
     transcript_body = _transcript_body(job, transcript_segments, identities)
     summary = summary or "No protocol generated - transcript only."
+    summary = linkify_entity_mentions(summary, catalog)
+    key_points = _bullet_section(enrichment.key_points if enrichment else [], catalog)
+    decisions = _bullet_section(enrichment.decisions if enrichment else [], catalog)
+    action_items = _action_items_section(enrichment, catalog)
+    open_questions = _bullet_section(enrichment.open_questions if enrichment else [], catalog)
+    links_mentioned = _bullet_section(enrichment.links_mentioned if enrichment else [])
     content = "\n".join(
         [
             frontmatter,
             "## Summary",
             "",
             summary.strip(),
+            "",
+            "---",
+            "",
+            "## Key Points",
+            "",
+            key_points,
             "",
             "---",
             "",
@@ -69,7 +88,19 @@ def render_meeting_markdown(
             "",
             "## Action Items",
             "",
-            action_items.strip(),
+            action_items,
+            "",
+            "---",
+            "",
+            "## Open Questions",
+            "",
+            open_questions,
+            "",
+            "---",
+            "",
+            "## Links Mentioned",
+            "",
+            links_mentioned,
             "",
             "---",
             "",
@@ -86,6 +117,7 @@ def _frontmatter(
     job: PipelineJob,
     config: AppConfig,
     identities: list[SpeakerIdentity],
+    enrichment: NoteEnrichment | None = None,
     transcription_confidence: float | None = None,
 ) -> str:
     info = job.meeting_info
@@ -101,30 +133,35 @@ def _frontmatter(
     duration_minutes = 0
     if event:
         duration_minutes = int((event.end_time - event.start_time).total_seconds() // 60)
+    enrichment = enrichment or NoteEnrichment()
+    tags = sorted({"meeting", "transcript", *enrichment.tags})
     lines = [
         "---",
+        f'session_id: "{job.session_id}"',
         f'title: "{title}"',
         f"date: {info.start_time:%Y-%m-%d}",
         f'time: "{info.start_time:%H:%M}"',
         f"duration_minutes: {duration_minutes}",
         f"app: {info.app}",
+        f'generated_at: "{datetime.now(UTC).isoformat()}"',
         "participants:",
         *participants,
         f'organizer: "{_wikify(event.organizer) if event and event.organizer else ""}"',
         f'calendar_event_id: "{event.event_id if event else ""}"',
         f'calendar_match_confidence: "{info.calendar_match_confidence}"',
         f"calendar_review_queued: {'true' if info.calendar_review_queued else 'false'}",
+        f"meeting_review_complete: {'false' if info.calendar_review_queued else 'true'}",
         "calendar_candidate_event_ids:",
         *candidate_event_ids,
         "tags:",
-        '  - "meeting"',
-        '  - "transcript"',
+        *[f'  - "{tag}"' for tag in tags],
         "status: complete",
         f'transcription_engine: "{config.transcription.engine}/{config.transcription.model}"',
         f'diarization: "{config.diarization.backend if config.diarization.enabled else "disabled"}"',
         "audio_files:",
         *audio_entries,
         f"transcription_confidence: {transcription_confidence if transcription_confidence is not None else 0.0}",
+        f"speaker_review_complete: {'false' if any(identity.review_queued for identity in identities) else 'true'}",
         "participants_identified:",
     ]
     for identity in identities:
@@ -134,6 +171,26 @@ def _frontmatter(
             lines.append(f"    similarity: {identity.similarity}")
         if identity.review_queued:
             lines.append("    review_queued: true")
+    lines.append("related_projects:")
+    lines.extend([f'  - "{value}"' for value in enrichment.related_projects] or ['  - ""'])
+    lines.append("related_brands:")
+    lines.extend([f'  - "{value}"' for value in enrichment.related_brands] or ['  - ""'])
+    lines.append("related_clients:")
+    lines.extend([f'  - "{value}"' for value in enrichment.related_clients] or ['  - ""'])
+    lines.append("links_mentioned:")
+    lines.extend([f'  - "{value}"' for value in enrichment.links_mentioned] or ['  - ""'])
+    lines.append("action_items_structured:")
+    if enrichment.action_items:
+        for item in enrichment.action_items:
+            lines.append(f'  - owner: "{item.owner}"')
+            lines.append(f'    text: "{item.text}"')
+            lines.append(f'    status: "{item.status}"')
+            lines.append(f'    due: "{item.due}"')
+    else:
+        lines.append('  - owner: ""')
+        lines.append('    text: ""')
+        lines.append('    status: ""')
+        lines.append('    due: ""')
     lines.append("calendar_attendees:")
     lines.extend(attendees or ['  - ""'])
     lines.append("calendar_candidates:")
@@ -164,6 +221,7 @@ def _transcript_body(
     job: PipelineJob, segments: list[TranscriptSegment], identities: list[SpeakerIdentity]
 ) -> str:
     identity_map = {identity.label: identity for identity in identities}
+    identity_map.update({identity.name: identity for identity in identities if identity.name})
     lines: list[str] = []
     for turn in _merge_speaker_turns(segments):
         timestamp = job.meeting_info.start_time + timedelta(seconds=turn.start)
@@ -213,3 +271,24 @@ def _relative_audio_paths(paths: list[Path], config: AppConfig) -> list[str]:
 
 def _wikify(name: str) -> str:
     return f"[[{name}]]" if name and not name.startswith("[[") else name
+
+
+def _bullet_section(items: list[str], catalog: EntityCatalog | None = None) -> str:
+    if not items:
+        return ""
+    catalog = catalog or EntityCatalog()
+    return "\n".join(f"- {linkify_entity_mentions(item, catalog)}" for item in items)
+
+
+def _action_items_section(enrichment: NoteEnrichment | None, catalog: EntityCatalog | None = None) -> str:
+    if enrichment is None or not enrichment.action_items:
+        return ""
+    catalog = catalog or EntityCatalog()
+    lines: list[str] = []
+    for item in enrichment.action_items:
+        text = linkify_entity_mentions(item.text, catalog)
+        if item.owner:
+            lines.append(f"- {item.owner}: {text}")
+        else:
+            lines.append(f"- {text}")
+    return "\n".join(lines)

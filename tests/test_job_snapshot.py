@@ -2,7 +2,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mt_linux.diarization.diarizer import DiarizationSegment
+from mt_linux.enrichment.models import ActionItem, NoteEnrichment
 from mt_linux.models import MeetingInfo, TranscriptSegment
+from mt_linux.models import SpeakerIdentity
 from mt_linux.pipeline.job import JobStatus, PipelineJob
 from mt_linux.pipeline.snapshot import JobSnapshotStore
 
@@ -25,7 +27,15 @@ def test_job_snapshot_round_trips_staged_outputs(tmp_path: Path):
         app_transcript_segments=[TranscriptSegment(start=0.0, end=1.0, text="Remote", speaker="SPEAKER_01", track="app")],
         mic_transcript_segments=[TranscriptSegment(start=0.5, end=1.5, text="Local", speaker="MIC_SPEAKER", track="mic")],
         diarization_segments=[DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_01")],
+        identities=[SpeakerIdentity(label="SPEAKER_01", name="Alice Smith", confidence="voice_profile")],
         summary="Summary text",
+        enrichment=NoteEnrichment(
+            key_points=["Point"],
+            decisions=["Decision"],
+            action_items=[ActionItem(owner="Alice Smith", text="Follow up")],
+            related_projects=["Project X"],
+            related_brands=["Brand X"],
+        ),
     )
     store.save(job)
 
@@ -40,4 +50,11 @@ def test_job_snapshot_round_trips_staged_outputs(tmp_path: Path):
     assert restored.mic_transcript_segments[0].track == "mic"
     assert restored.diarization_segments is not None
     assert restored.diarization_segments[0].speaker == "SPEAKER_01"
+    assert restored.identities is not None
+    assert restored.identities[0].name == "Alice Smith"
     assert restored.summary == "Summary text"
+    assert restored.enrichment is not None
+    assert restored.enrichment.related_projects == ["Project X"]
+    assert restored.enrichment.related_brands == ["Brand X"]
+    assert restored.history
+    assert restored.history[0].message == "Job created"

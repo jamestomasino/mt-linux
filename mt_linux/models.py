@@ -41,6 +41,8 @@ class MeetingInfo:
     calendar_candidates: list[CalendarEvent] = field(default_factory=list)
     calendar_match_confidence: str = "none"
     calendar_review_queued: bool = False
+    calendar_match_method: str = "deterministic"
+    calendar_match_rationale: str = ""
 
 
 @dataclass

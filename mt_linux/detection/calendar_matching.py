@@ -18,7 +18,13 @@ def choose_calendar_event(
 ) -> tuple[CalendarEvent | None, list[CalendarEvent], str]:
     filtered = [item for item in candidates if item.conferencing_type or item.conferencing_url]
     if not filtered:
-        return None, [], "none"
+        plausible = [item for item in candidates if _reviewable_without_conferencing(item)]
+        plausible = sorted(
+            plausible,
+            key=lambda item: _score_nonconference_candidate(meeting_info, item),
+            reverse=True,
+        )
+        return None, plausible, "none"
 
     scored = sorted(
         filtered,
@@ -55,3 +61,13 @@ def _same_strength(meeting_info: MeetingInfo, top: CalendarEvent, other: Calenda
     top_delta = abs((top.start_time - meeting_info.start_time).total_seconds())
     other_delta = abs((other.start_time - meeting_info.start_time).total_seconds())
     return abs(top_delta - other_delta) <= 300
+
+
+def _reviewable_without_conferencing(candidate: CalendarEvent) -> bool:
+    return bool(candidate.response_status)
+
+
+def _score_nonconference_candidate(meeting_info: MeetingInfo, candidate: CalendarEvent) -> tuple[int, int]:
+    accepted = int(candidate.response_status == "accepted")
+    proximity = -int(abs((candidate.start_time - meeting_info.start_time).total_seconds()))
+    return accepted, proximity
