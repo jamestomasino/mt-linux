@@ -29,6 +29,8 @@ def _should_drop_mic_segment(segment: TranscriptSegment) -> bool:
     normalized = _normalize_text(text)
     if not normalized:
         return True
+    if _is_repeated_hallucination(normalized):
+        return True
     word_count = len(normalized.split())
     low_confidence = segment.confidence is not None and segment.confidence <= -0.8
     likely_no_speech = segment.no_speech_prob is not None and segment.no_speech_prob >= 0.5
@@ -47,3 +49,18 @@ def _normalize_text(text: str) -> str:
 
 def _is_punctuation_only(text: str) -> bool:
     return not re.search(r"\w", text)
+
+
+def _is_repeated_hallucination(normalized: str) -> bool:
+    words = normalized.split()
+    if not words:
+        return True
+    if normalized in _MIC_HALLUCINATION_PHRASES:
+        return True
+    if len(words) % 2 == 0:
+        pairs = [" ".join(words[index : index + 2]) for index in range(0, len(words), 2)]
+        if pairs and all(pair == pairs[0] for pair in pairs) and pairs[0] in _MIC_HALLUCINATION_PHRASES:
+            return True
+    if all(word == words[0] for word in words) and words[0] in {"amen", "thanks"}:
+        return True
+    return False

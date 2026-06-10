@@ -25,6 +25,18 @@ def test_suppress_low_signal_segments_drops_common_silence_hallucinations_on_mic
     assert [segment.text for segment in kept] == ["We should ship that change"]
 
 
+def test_suppress_low_signal_segments_drops_repeated_hallucination_phrases_on_mic():
+    kept = suppress_low_signal_segments(
+        [
+            TranscriptSegment(start=0.0, end=1.2, text="Thank you. Thank you.", track="mic"),
+            TranscriptSegment(start=1.2, end=2.4, text="Amen. Amen. Amen.", track="mic"),
+            TranscriptSegment(start=2.4, end=3.0, text="This is a real comment", track="mic"),
+        ],
+        track="mic",
+    )
+    assert [segment.text for segment in kept] == ["This is a real comment"]
+
+
 def test_suppress_low_signal_segments_leaves_app_track_unchanged():
     segments = [
         TranscriptSegment(start=0.0, end=0.8, text="Thank you", confidence=-1.1, no_speech_prob=0.82, track="app"),
