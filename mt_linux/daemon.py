@@ -34,6 +34,7 @@ from mt_linux.pipeline.transcript_tracks import (
 from mt_linux.protocol.ollama_generator import OllamaProtocolGenerator
 from mt_linux.protocol.quality import has_substantive_transcript
 from mt_linux.runtime.meeting_sessions import MeetingSessionManager
+from mt_linux.transcription.cleanup import suppress_low_signal_segments
 from mt_linux.transcription.faster_whisper import FasterWhisperEngine
 
 
@@ -136,7 +137,10 @@ class MeetingPipeline:
             track="app",
         )
         job.mic_transcript_segments = relabel_segments(
-            engine.transcribe(job.mic_audio_path, language=language),
+            suppress_low_signal_segments(
+                engine.transcribe(job.mic_audio_path, language=language),
+                track="mic",
+            ),
             speaker=self.config.speakers.mic_speaker_name or MIC_SPEAKER_LABEL,
             track="mic",
         )

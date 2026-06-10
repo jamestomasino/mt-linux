@@ -52,6 +52,7 @@ class TranscriptSegment:
     text: str
     speaker: str = "SPEAKER_00"
     confidence: float | None = None
+    no_speech_prob: float | None = None
     track: str = "mixed"
 
 

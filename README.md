@@ -48,23 +48,33 @@ Important runtime paths outside the repo:
 
 ## Installation
 
-Recommended install on Ubuntu and other externally-managed Python systems:
+Recommended runtime install on Ubuntu and other externally-managed Python systems:
 
 ```bash
 pipx install --force --editable .
 scripts/setup.sh
 ```
 
-If you are working inside your own virtualenv, editable `pip` install is also fine:
+Recommended development environment in the repo checkout:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e .
+```
+
+If you want the heavier tooling in the repo-local environment as well, use:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e '.[dev]'
+```
+
+If you are already working inside your own virtualenv, editable `pip` install is also fine:
 
 ```bash
 python3 -m pip install -e .
-```
-
-Development extras in a virtualenv:
-
-```bash
-python3 -m pip install -e '.[dev]'
 ```
 
 Why `pipx` is the default:
@@ -72,6 +82,7 @@ Why `pipx` is the default:
 - Ubuntu system Python commonly blocks direct editable installs with PEP 668
 - `pipx` installs `mt-ctl` and `mt-linux` into isolated user environments
 - the console scripts are then available on `~/.local/bin`
+- it is the right target for the `systemd` user service
 
 The setup script:
 
@@ -80,6 +91,12 @@ The setup script:
 - creates local config/data/state directories
 - runs local bootstrap
 - runs `mt-ctl doctor`
+
+Recommended split:
+
+- use `pipx` for the installed app and the `systemd` user service
+- use `.venv` for repo-local development, tests, and ad hoc scripts
+- avoid installing directly into the system Python
 
 ## Dependencies
 

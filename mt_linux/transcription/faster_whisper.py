@@ -26,12 +26,18 @@ class FasterWhisperEngine(TranscribingEngine):
             str(audio_path),
             language=language,
             word_timestamps=True,
+            vad_filter=True,
+            condition_on_previous_text=False,
         )
         return [
             TranscriptSegment(
                 start=float(segment.start),
                 end=float(segment.end),
                 text=segment.text.strip(),
+                confidence=float(segment.avg_logprob) if getattr(segment, "avg_logprob", None) is not None else None,
+                no_speech_prob=float(segment.no_speech_prob)
+                if getattr(segment, "no_speech_prob", None) is not None
+                else None,
             )
             for segment in segments
         ]
