@@ -77,6 +77,17 @@ def clear_meeting_assignment(
     path.write_text(content, encoding="utf-8")
 
 
+def condense_transcript_turns(path: Path) -> None:
+    content = path.read_text(encoding="utf-8")
+    pattern = r"(## Transcript\n\n)(.*?)(\n\n---\n|\Z)"
+    match = re.search(pattern, content, flags=re.S)
+    if not match:
+        return
+    condensed = _condense_transcript_block(match.group(2))
+    updated = content[: match.start(2)] + condensed + content[match.end(2) :]
+    path.write_text(updated, encoding="utf-8")
+
+
 def _replace_scalar(content: str, key: str, value: str, quoted: bool = True) -> str:
     rendered = f'"{value}"' if quoted else value
     return re.sub(rf"^{re.escape(key)}:.*$", f"{key}: {rendered}", content, flags=re.MULTILINE)
@@ -254,3 +265,35 @@ def _remove_participants_table_row(content: str, speaker_label: str) -> str:
 
 def _collapse_excess_blank_lines(content: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", content)
+
+
+def _condense_transcript_block(block: str) -> str:
+    lines = [line.rstrip() for line in block.strip().splitlines()]
+    turns: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    turn_pattern = re.compile(r"^\*\*(\d{2}:\d{2}:\d{2})\*\*\s+(.+?):\s*(.*)$")
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = turn_pattern.match(line)
+        if not match:
+            if current is not None:
+                current["text"] = f'{current["text"]} {line}'.strip()
+            continue
+        timestamp, speaker, text = match.groups()
+        if current and current["speaker"] == speaker:
+            current["text"] = f'{current["text"]} {text}'.strip()
+            continue
+        if current is not None:
+            turns.append(current)
+        current = {"timestamp": timestamp, "speaker": speaker, "text": text.strip()}
+
+    if current is not None:
+        turns.append(current)
+
+    return "\n\n".join(
+        f'**{turn["timestamp"]}** {turn["speaker"]}: {turn["text"]}'.rstrip()
+        for turn in turns
+    )

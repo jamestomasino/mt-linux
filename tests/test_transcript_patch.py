@@ -11,6 +11,7 @@ from mt_linux.models import ReviewEntry
 from mt_linux.output.transcript_patch import (
     apply_meeting_assignment,
     clear_meeting_assignment,
+    condense_transcript_turns,
     remove_speaker_label,
     replace_speaker_label,
 )
@@ -234,6 +235,34 @@ calendar_candidates:
     assert 'organizer: ""' in content
     assert 'title: "Ad Hoc Meeting"' in content
     assert "duration_minutes: 0" in content
+
+
+def test_condense_transcript_turns_merges_adjacent_same_speaker_blocks(tmp_path: Path):
+    transcript = tmp_path / "meeting.md"
+    transcript.write_text(
+        """---
+title: "Meeting"
+---
+
+## Transcript
+
+**14:30:00** [[Alice Smith]]: Hello
+
+**14:30:05** [[Alice Smith]]: there
+
+**14:30:10** [[Bob Jones]]: Hi
+
+**14:30:15** [[Bob Jones]]: back
+
+---
+""",
+        encoding="utf-8",
+    )
+    condense_transcript_turns(transcript)
+    content = transcript.read_text(encoding="utf-8")
+    assert "**14:30:00** [[Alice Smith]]: Hello there" in content
+    assert "**14:30:10** [[Bob Jones]]: Hi back" in content
+    assert content.count("**14:30:") == 2
 
 
 def test_review_run_refreshes_summary_for_changed_session(tmp_path: Path, monkeypatch):
