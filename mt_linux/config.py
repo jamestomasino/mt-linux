@@ -19,7 +19,7 @@ class AudioConfig:
 @dataclass
 class DetectionConfig:
     poll_interval_seconds: int = 5
-    grace_period_seconds: int = 15
+    grace_period_seconds: int = 5
     apps_to_watch: list[str] = field(
         default_factory=lambda: ["zoom", "teams", "webex", "meet", "slack"]
     )
