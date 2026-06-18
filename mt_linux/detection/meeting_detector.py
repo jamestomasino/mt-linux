@@ -32,7 +32,7 @@ class PipeWireActivityPoller:
         self,
         poll_interval: int,
         callbacks: DetectorCallbacks,
-        grace_period_seconds: int = 15,
+        grace_period_seconds: int = 5,
         activity_gate: Callable[[str, int, int], bool] | None = None,
     ):
         self.poll_interval = poll_interval
@@ -61,6 +61,17 @@ class PipeWireActivityPoller:
                 if not self._activity_gate(app, pid, stream_id):
                     active = None
             transition = self._activity_state.update(active)
+            if transition.ended:
+                app, pid, stream_id = transition.ended
+                self.callbacks.on_meeting_end(
+                    MeetingInfo(
+                        app=app,
+                        pid=pid,
+                        detection_method="pipewire",
+                        start_time=datetime.now(UTC),
+                        stream_id=stream_id,
+                    )
+                )
             if transition.started:
                 app, pid, stream_id = transition.started
                 self.callbacks.on_meeting_start(
@@ -73,17 +84,6 @@ class PipeWireActivityPoller:
                         title=None,
                     )
                 )
-            if transition.ended:
-                app, pid, stream_id = transition.ended
-                self.callbacks.on_meeting_end(
-                    MeetingInfo(
-                        app=app,
-                        pid=pid,
-                        detection_method="pipewire",
-                        start_time=datetime.now(UTC),
-                        stream_id=stream_id,
-                    )
-                )
             time.sleep(self.poll_interval)
 
 
@@ -93,7 +93,7 @@ class MeetingDetector:
         on_meeting_start,
         on_meeting_end,
         poll_interval: int = 5,
-        grace_period_seconds: int = 15,
+        grace_period_seconds: int = 5,
         activity_gate: Callable[[str, int, int], bool] | None = None,
     ):
         callbacks = DetectorCallbacks(on_meeting_start=on_meeting_start, on_meeting_end=on_meeting_end)

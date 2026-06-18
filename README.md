@@ -145,6 +145,7 @@ Common settings:
 - `audio.mic_device_name`: physical microphone source name to record
 - `audio.system_source_name`: optional explicit system-audio monitor source
 - `speakers.mic_speaker_name`: your display name
+- `detection.grace_period_seconds`: how long to keep a meeting alive after audio drops
 - `calendar.backend`: `google`, `caldav`, or `none`
 - `calendar.lookup_window_minutes`: candidate lookup window
 - `transcription.model`: Whisper model name
@@ -157,6 +158,7 @@ Audio capture behavior:
 - on meeting start, `mt-linux` tries to capture the meeting app's specific playback sink first
 - if app-specific sink detection fails, it falls back to the current default sink monitor so recording still succeeds
 - if `audio.system_source_name` is set, that source is used directly instead of auto-detection
+- if a different meeting app or PID appears, `mt-linux` now forces an immediate handoff instead of waiting for the full grace period
 
 ## Calendar Configuration
 

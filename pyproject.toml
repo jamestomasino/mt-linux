@@ -25,6 +25,7 @@ dependencies = [
   "rich>=13.0",
   "scipy>=1.10",
   "sounddevice>=0.4",
+  "textual>=0.70",
   "torch>=2.1",
 ]
 

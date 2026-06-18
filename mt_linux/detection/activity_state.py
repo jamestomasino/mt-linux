@@ -11,7 +11,7 @@ class ActivityTransition:
 
 
 class MeetingActivityState:
-    def __init__(self, grace_period_seconds: int = 15):
+    def __init__(self, grace_period_seconds: int = 5):
         self.grace_period = timedelta(seconds=grace_period_seconds)
         self.active: tuple[str, int, int] | None = None
         self.last_seen_active_at: datetime | None = None
@@ -27,8 +27,12 @@ class MeetingActivityState:
             if self.active is None:
                 self.active = observed_active
                 return ActivityTransition(started=observed_active)
+            if _same_meeting(self.active, observed_active):
+                self.active = observed_active
+                return ActivityTransition()
+            ended = self.active
             self.active = observed_active
-            return ActivityTransition()
+            return ActivityTransition(started=observed_active, ended=ended)
 
         if self.active is None or self.last_seen_active_at is None:
             return ActivityTransition()
@@ -38,3 +42,7 @@ class MeetingActivityState:
         self.active = None
         self.last_seen_active_at = None
         return ActivityTransition(ended=ended)
+
+
+def _same_meeting(left: tuple[str, int, int], right: tuple[str, int, int]) -> bool:
+    return left[0] == right[0] and left[1] == right[1]

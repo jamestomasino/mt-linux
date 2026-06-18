@@ -84,3 +84,36 @@ def test_pipeline_queue_requeues_incomplete_job_until_complete(tmp_path: Path):
         assert store.load_pending() == []
 
     asyncio.run(runner())
+
+
+def test_pipeline_queue_snapshot_includes_queued_job_ids(tmp_path: Path):
+    async def runner() -> None:
+        store = JobSnapshotStore(tmp_path)
+        queue = PipelineQueue(store=store)
+        first = PipelineJob(
+            session_id="session-1",
+            app_audio_path=tmp_path / "app1.wav",
+            mic_audio_path=tmp_path / "mic1.wav",
+            meeting_info=MeetingInfo(
+                app="zoom",
+                pid=1,
+                detection_method="import",
+                start_time=datetime(2026, 6, 7, 14, 30),
+            ),
+        )
+        second = PipelineJob(
+            session_id="session-2",
+            app_audio_path=tmp_path / "app2.wav",
+            mic_audio_path=tmp_path / "mic2.wav",
+            meeting_info=MeetingInfo(
+                app="teams",
+                pid=2,
+                detection_method="import",
+                start_time=datetime(2026, 6, 7, 15, 0),
+            ),
+        )
+        await queue.enqueue(first)
+        await queue.enqueue(second)
+        assert queue.snapshot()["queued_jobs"] == ["session-1", "session-2"]
+
+    asyncio.run(runner())

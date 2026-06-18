@@ -15,6 +15,7 @@ class PipelineQueue:
     def __init__(self, store: JobSnapshotStore | None = None):
         self._queue: asyncio.Queue[PipelineJob] = asyncio.Queue()
         self._active_job: PipelineJob | None = None
+        self._queued_session_ids: list[str] = []
         self.store = store or JobSnapshotStore()
 
     @property
@@ -23,16 +24,19 @@ class PipelineQueue:
 
     async def enqueue(self, job: PipelineJob) -> None:
         await self._queue.put(job)
+        self._queued_session_ids.append(job.session_id)
         self.store.save(job)
 
     async def restore(self) -> None:
         for job in self.store.load_pending():
             await self._queue.put(job)
+            self._queued_session_ids.append(job.session_id)
 
     def snapshot(self) -> dict[str, object]:
         return {
             "active_job": self._active_job.session_id if self._active_job else None,
             "queue_depth": self._queue.qsize(),
+            "queued_jobs": list(self._queued_session_ids),
         }
 
     async def run_worker(
@@ -42,12 +46,14 @@ class PipelineQueue:
     ) -> None:
         while True:
             job = await self._queue.get()
+            self._discard_queued_session_id(job.session_id)
             self._active_job = job
             self.store.save(job)
             try:
                 await processor(job)
                 if job.status not in {JobStatus.COMPLETE, JobStatus.FAILED}:
                     await self._queue.put(job)
+                    self._queued_session_ids.append(job.session_id)
             except Exception as exc:
                 job.status = JobStatus.FAILED
                 job.error = str(exc)
@@ -57,3 +63,9 @@ class PipelineQueue:
             finally:
                 self._active_job = None
                 self._queue.task_done()
+
+    def _discard_queued_session_id(self, session_id: str) -> None:
+        try:
+            self._queued_session_ids.remove(session_id)
+        except ValueError:
+            return

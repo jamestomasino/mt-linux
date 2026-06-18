@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from mt_linux.models import MeetingReviewEntry, ReviewEntry
-from mt_linux.pipeline.job import PipelineJob
+from mt_linux.pipeline.job import JobStatus, PipelineJob
 from mt_linux.pipeline.meeting_review_queue import MeetingReviewQueue
 from mt_linux.pipeline.review_queue import ReviewQueue
 from mt_linux.pipeline.snapshot import JobSnapshotStore
@@ -33,6 +33,30 @@ def remove_job(
                 deleted_paths.append(path)
     store.remove(session_id)
     return True, deleted_paths
+
+
+def retry_job(
+    session_id: str,
+    *,
+    review_queue: ReviewQueue | None = None,
+    meeting_review_queue: MeetingReviewQueue | None = None,
+    store: JobSnapshotStore | None = None,
+) -> tuple[bool, str]:
+    store = store or JobSnapshotStore()
+    review_queue = review_queue or ReviewQueue()
+    meeting_review_queue = meeting_review_queue or MeetingReviewQueue()
+    job = store.load_one(session_id)
+    if job is None:
+        return False, "not_found"
+    if job.status != JobStatus.FAILED:
+        return False, "not_failed"
+    deleted_paths: list[Path] = []
+    _remove_review_entries(session_id, review_queue, deleted_paths)
+    _remove_meeting_review_entries(session_id, meeting_review_queue)
+    job.error = None
+    job.set_status(JobStatus.PENDING, "Retry requested")
+    store.save(job)
+    return True, "retried"
 
 
 def _remove_review_entries(session_id: str, queue: ReviewQueue, deleted_paths: list[Path]) -> None:

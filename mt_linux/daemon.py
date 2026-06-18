@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 import json
 import logging
 
@@ -331,6 +332,58 @@ class DaemonState:
         tmp.replace(STATE_FILE)
 
 
+class MeetingLifecycleCoordinator:
+    def __init__(
+        self,
+        session_manager: MeetingSessionManager,
+        state: DaemonState,
+        *,
+        handoff_window_seconds: int = 30,
+    ):
+        self.session_manager = session_manager
+        self.state = state
+        self.handoff_window = timedelta(seconds=handoff_window_seconds)
+        self._last_ended_title: str | None = None
+        self._last_ended_at: datetime | None = None
+
+    async def handle_meeting_start(self, info) -> None:
+        previous_title = self._recent_ended_title()
+        await self.session_manager.handle_meeting_start(info)
+        self.state.write()
+        active = self.session_manager.active
+        if active is None:
+            return
+        current_title = active.meeting_info.title or active.meeting_info.app
+        if previous_title and previous_title != current_title:
+            notify(
+                "Meeting Transcriber",
+                f"Meeting changed: {previous_title} -> {current_title}",
+                urgency="critical",
+            )
+
+    async def handle_meeting_end(self, info) -> None:
+        active = self.session_manager.active
+        ended_title = None
+        if active is not None:
+            ended_title = active.meeting_info.title or active.meeting_info.app
+        elif info.title or info.app:
+            ended_title = info.title or info.app
+        await self.session_manager.handle_meeting_end(info)
+        if ended_title:
+            self._last_ended_title = ended_title
+            self._last_ended_at = datetime.now(UTC)
+        self.state.write()
+
+    def _recent_ended_title(self) -> str | None:
+        if self._last_ended_title is None or self._last_ended_at is None:
+            return None
+        if datetime.now(UTC) - self._last_ended_at > self.handoff_window:
+            self._last_ended_title = None
+            self._last_ended_at = None
+            return None
+        return self._last_ended_title
+
+
 async def handle_control_request(
     session_manager: MeetingSessionManager,
     state: DaemonState,
@@ -405,15 +458,16 @@ async def run_daemon() -> None:
         recorder=create_session_recorder(config.audio),
     )
     state = DaemonState(queue, session_manager)
+    coordinator = MeetingLifecycleCoordinator(session_manager, state)
     await queue.restore()
     worker = asyncio.create_task(queue.run_worker(pipeline.process, on_failure=handle_job_failure))
     loop = asyncio.get_running_loop()
     detector = MeetingDetector(
         on_meeting_start=lambda info: asyncio.run_coroutine_threadsafe(
-            session_manager.handle_meeting_start(info), loop
+            coordinator.handle_meeting_start(info), loop
         ),
         on_meeting_end=lambda info: asyncio.run_coroutine_threadsafe(
-            session_manager.handle_meeting_end(info), loop
+            coordinator.handle_meeting_end(info), loop
         ),
         poll_interval=config.detection.poll_interval_seconds,
         grace_period_seconds=config.detection.grace_period_seconds,

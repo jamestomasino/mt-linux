@@ -4,8 +4,8 @@ import shutil
 import subprocess
 
 
-def notify(title: str, message: str) -> None:
+def notify(title: str, message: str, *, urgency: str = "normal") -> None:
     command = shutil.which("notify-send")
     if not command:
         return
-    subprocess.run([command, title, message], check=False)
+    subprocess.run([command, "-u", urgency, title, message], check=False)

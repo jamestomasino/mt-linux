@@ -33,3 +33,14 @@ def test_activity_state_does_not_restart_when_stream_identity_changes_mid_meetin
     changed = state.update(("zoom", 100, 2), now=start + timedelta(seconds=5))
     assert changed.started is None
     assert changed.ended is None
+
+
+def test_activity_state_switches_immediately_when_meeting_process_changes():
+    state = MeetingActivityState(grace_period_seconds=15)
+    start = datetime(2026, 6, 7, 14, 30, tzinfo=UTC)
+    first = state.update(("zoom", 100, 1), now=start)
+    assert first.started == ("zoom", 100, 1)
+
+    switched = state.update(("teams", 200, 9), now=start + timedelta(seconds=5))
+    assert switched.ended == ("zoom", 100, 1)
+    assert switched.started == ("teams", 200, 9)

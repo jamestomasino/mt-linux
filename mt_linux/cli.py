@@ -37,7 +37,7 @@ from mt_linux.output.transcript_patch import (
 )
 from mt_linux.paths import STATE_FILE, ensure_directories
 from mt_linux.pipeline.job import JobStatus, PipelineJob
-from mt_linux.pipeline.job_admin import remove_job
+from mt_linux.pipeline.job_admin import remove_job, retry_job
 from mt_linux.pipeline.meeting_review_queue import MeetingReviewQueue
 from mt_linux.pipeline.snapshot import JobSnapshotStore
 from mt_linux.pipeline.review_queue import ReviewQueue
@@ -137,13 +137,16 @@ def jobs(ctx: click.Context) -> None:
 
 @jobs.command("list")
 def jobs_list() -> None:
-    """List persisted jobs."""
+    """List pending and failed jobs."""
     store = JobSnapshotStore()
-    pending = store.load_pending()
-    if not pending:
-        click.echo("No pending jobs.")
+    jobs = [
+        job for job in sorted(store.load_all(), key=lambda item: item.created_at, reverse=True)
+        if job.status != JobStatus.COMPLETE
+    ]
+    if not jobs:
+        click.echo("No pending or failed jobs.")
         return
-    for job in pending:
+    for job in jobs:
         click.echo(f"{job.session_id}  {job.status.value}  {job.meeting_info.title or job.meeting_info.app}")
 
 
@@ -193,6 +196,42 @@ def jobs_cancel(session_ids: tuple[str, ...], delete_audio: bool) -> None:
         click.echo(f"Canceled {session_id}{detail}")
     if canceled == 0:
         raise SystemExit(1)
+
+
+@jobs.command("retry")
+@click.argument("session_ids", nargs=-1, required=True)
+def jobs_retry(session_ids: tuple[str, ...]) -> None:
+    """Reset failed jobs to pending so they can resume processing."""
+    store = JobSnapshotStore()
+    review_queue = ReviewQueue()
+    meeting_review_queue = MeetingReviewQueue()
+    retried = 0
+    for session_id in session_ids:
+        ok, reason = retry_job(
+            session_id,
+            review_queue=review_queue,
+            meeting_review_queue=meeting_review_queue,
+            store=store,
+        )
+        if ok:
+            retried += 1
+            click.echo(f"Retried {session_id}")
+            continue
+        if reason == "not_found":
+            click.echo(f"Job not found: {session_id}")
+            continue
+        if reason == "not_failed":
+            click.echo(f"Job is not failed: {session_id}")
+            continue
+        click.echo(f"Could not retry {session_id}")
+    if retried == 0:
+        raise SystemExit(1)
+
+
+@cli.command("tui")
+def tui() -> None:
+    """Launch the interactive terminal UI."""
+    _launch_tui()
 
 
 @cli.command()
@@ -342,25 +381,37 @@ def review_run(session_id: str) -> None:
     changed_sessions: set[str] = set()
     changed_entries: dict[str, list[ReviewEntry]] = {}
     for entry in entries:
-        original_transcript_path = entry.transcript_path
+        transcript_path = _resolve_review_transcript_path(entry, store, current)
         click.echo(f"Meeting: {entry.meeting_title or 'Untitled'} ({entry.meeting_date.isoformat()})")
         click.echo(f"Speaker: {entry.speaker_label}")
         _play_sample(entry.sample_path)
         choice = click.prompt("Name, x to remove as noise, or blank to skip", default="", show_default=False)
         if not choice:
             continue
-        if choice.lower() == "x":
-            remove_speaker_label(entry.transcript_path, entry.speaker_label)
-            action_message = f"Removed {entry.speaker_label} as noise"
+        note_updated = False
+        if transcript_path.exists():
+            if choice.lower() == "x":
+                remove_speaker_label(transcript_path, entry.speaker_label)
+                action_message = f"Removed {entry.speaker_label} as noise"
+            else:
+                replace_speaker_label(transcript_path, entry.speaker_label, choice)
+                action_message = f"Identified as {choice}"
+            note_updated = True
         else:
-            replace_speaker_label(entry.transcript_path, entry.speaker_label, choice)
-            action_message = f"Identified as {choice}"
+            if choice.lower() == "x":
+                action_message = f"Removed {entry.speaker_label} as noise (transcript missing; skipped note update)"
+            else:
+                action_message = f"Identified as {choice} (transcript missing; skipped note update)"
+        _apply_review_choice_to_job(store, entry, choice)
         queue.remove(entry.session_id, entry.speaker_label)
         if entry.sample_path.exists():
             entry.sample_path.unlink()
         changed_sessions.add(entry.session_id)
+        entry.transcript_path = transcript_path
         changed_entries.setdefault(entry.session_id, []).append(entry)
         click.echo(action_message)
+        if not note_updated:
+            click.echo(f"Warning: transcript not found at {transcript_path}")
     for changed_session in sorted(changed_sessions):
         if _refresh_job_summary(store, current, changed_session):
             continue
@@ -371,6 +422,46 @@ def review_run(session_id: str) -> None:
             fallback_entry.meeting_title or "Meeting",
         ):
             click.echo(f"Refreshed summary for {fallback_entry.meeting_title or changed_session}")
+
+
+def _resolve_review_transcript_path(entry: ReviewEntry, store: JobSnapshotStore, config: AppConfig) -> Path:
+    if entry.transcript_path.exists():
+        return entry.transcript_path
+    job = store.load_one(entry.session_id)
+    if job is None:
+        return entry.transcript_path
+    current_path = output_path_for(job, config)
+    if current_path.exists():
+        return current_path
+    return entry.transcript_path
+
+
+def _apply_review_choice_to_job(store: JobSnapshotStore, entry: ReviewEntry, choice: str) -> None:
+    job = store.load_one(entry.session_id)
+    if job is None or job.identities is None:
+        return
+    updated = False
+    kept = []
+    for identity in job.identities:
+        if identity.label != entry.speaker_label:
+            kept.append(identity)
+            continue
+        updated = True
+        if choice.lower() == "x":
+            continue
+        identity.name = choice
+        identity.confidence = "voice_profile"
+        identity.review_queued = False
+        kept.append(identity)
+    if not updated:
+        return
+    job.identities = kept
+    job.add_event(
+        f"Speaker review: removed {entry.speaker_label} as noise"
+        if choice.lower() == "x"
+        else f"Speaker review: identified {entry.speaker_label} as {choice}"
+    )
+    store.save(job)
 
 
 @cli.group("review-meetings", invoke_without_command=True)
@@ -646,6 +737,15 @@ def auth_google() -> None:
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(str(token_path))
+
+
+def _launch_tui() -> None:
+    from mt_linux.tui import run_tui
+
+    try:
+        run_tui()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _play_sample(path: Path) -> None:

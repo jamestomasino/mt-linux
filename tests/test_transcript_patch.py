@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from click.testing import CliRunner
 
 from mt_linux.cli import cli
-from mt_linux.models import ReviewEntry
+from mt_linux.models import ReviewEntry, SpeakerIdentity
 from mt_linux.output.transcript_patch import (
     apply_meeting_assignment,
     clear_meeting_assignment,
@@ -419,6 +419,165 @@ Old summary
     result = runner.invoke(cli, ["review", "run"], input="Alice Smith\n", env={})
     assert result.exit_code == 0
     assert refreshed_paths == [transcript]
+
+
+def test_review_run_uses_current_job_transcript_path_when_queue_path_is_stale(tmp_path: Path, monkeypatch):
+    stale_transcript = tmp_path / "old-name.md"
+    current_transcript = tmp_path / "2026-06-09_14-30_meeting.md"
+    current_transcript.write_text(
+        """---
+title: "Meeting"
+participants:
+  - "[[SPEAKER_01]]"
+participants_identified:
+  - name: "SPEAKER_01"
+    confidence: "unidentified"
+    review_queued: true
+---
+
+## Summary
+
+Old summary
+
+---
+
+## Participants
+
+| Speaker | Identity | Confidence |
+|---------|----------|------------|
+| SPEAKER_01 | SPEAKER_01 | unidentified |
+
+---
+
+## Transcript
+
+**14:30:00** SPEAKER_01: Hello there
+""",
+        encoding="utf-8",
+    )
+    sample = tmp_path / "sample.wav"
+    sample.write_bytes(b"wav")
+    store = JobSnapshotStore(tmp_path / "jobs")
+    job = PipelineJob(
+        session_id="session-1",
+        app_audio_path=tmp_path / "app.wav",
+        mic_audio_path=tmp_path / "mic.wav",
+        meeting_info=MeetingInfo(
+            app="zoom",
+            pid=1,
+            detection_method="pipewire",
+            start_time=datetime(2026, 6, 9, 14, 30),
+            title="Meeting",
+        ),
+        identities=[
+            SpeakerIdentity(
+                label="SPEAKER_01",
+                name="SPEAKER_01",
+                confidence="unidentified",
+                review_queued=True,
+            )
+        ],
+        status=JobStatus.COMPLETE,
+    )
+    store.save(job)
+    queue = ReviewQueue(tmp_path / "review_queue.json")
+    queue.add(
+        ReviewEntry(
+            session_id="session-1",
+            speaker_label="SPEAKER_01",
+            sample_path=sample,
+            calendar_attendees=[],
+            meeting_title="Meeting",
+            meeting_date=datetime(2026, 6, 9).date(),
+            transcript_path=stale_transcript,
+        )
+    )
+    cfg = AppConfig()
+    cfg.output.folder = str(tmp_path)
+    refreshed: list[str] = []
+    monkeypatch.setattr("mt_linux.cli.ReviewQueue", lambda: queue)
+    monkeypatch.setattr("mt_linux.cli.JobSnapshotStore", lambda: store)
+    monkeypatch.setattr("mt_linux.cli.AppConfig.load", lambda: cfg)
+    monkeypatch.setattr("mt_linux.cli._play_sample", lambda _path: None)
+    monkeypatch.setattr(
+        "mt_linux.cli._refresh_job_summary",
+        lambda _store, _config, session_id: refreshed.append(session_id) or True,
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["review", "run"], input="Alice Smith\n", env={})
+    assert result.exit_code == 0
+    assert "Identified as Alice Smith" in result.output
+    assert refreshed == ["session-1"]
+    content = current_transcript.read_text(encoding="utf-8")
+    assert "[[Alice Smith]]" in content
+    updated = store.load_one("session-1")
+    assert updated is not None
+    assert updated.identities is not None
+    assert updated.identities[0].name == "Alice Smith"
+    assert updated.identities[0].confidence == "voice_profile"
+    assert updated.identities[0].review_queued is False
+
+
+def test_review_run_warns_when_transcript_is_missing(tmp_path: Path, monkeypatch):
+    sample = tmp_path / "sample.wav"
+    sample.write_bytes(b"wav")
+    store = JobSnapshotStore(tmp_path / "jobs")
+    job = PipelineJob(
+        session_id="session-1",
+        app_audio_path=tmp_path / "app.wav",
+        mic_audio_path=tmp_path / "mic.wav",
+        meeting_info=MeetingInfo(
+            app="zoom",
+            pid=1,
+            detection_method="pipewire",
+            start_time=datetime(2026, 6, 9, 14, 30),
+            title="Meeting",
+        ),
+        identities=[
+            SpeakerIdentity(
+                label="SPEAKER_01",
+                name="SPEAKER_01",
+                confidence="unidentified",
+                review_queued=True,
+            )
+        ],
+        status=JobStatus.COMPLETE,
+    )
+    store.save(job)
+    queue = ReviewQueue(tmp_path / "review_queue.json")
+    queue.add(
+        ReviewEntry(
+            session_id="session-1",
+            speaker_label="SPEAKER_01",
+            sample_path=sample,
+            calendar_attendees=[],
+            meeting_title="Meeting",
+            meeting_date=datetime(2026, 6, 9).date(),
+            transcript_path=tmp_path / "missing.md",
+        )
+    )
+    refreshed_paths: list[Path] = []
+    monkeypatch.setattr("mt_linux.cli.ReviewQueue", lambda: queue)
+    monkeypatch.setattr("mt_linux.cli.JobSnapshotStore", lambda: store)
+    monkeypatch.setattr("mt_linux.cli._play_sample", lambda _path: None)
+    monkeypatch.setattr("mt_linux.cli._refresh_job_summary", lambda _store, _config, _session_id: False)
+    monkeypatch.setattr(
+        "mt_linux.cli._refresh_summary_for_path",
+        lambda path, _config, _title: refreshed_paths.append(path) or False,
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["review", "run"], input="Helene Golombek\n", env={})
+    assert result.exit_code == 0
+    assert "transcript missing; skipped note update" in result.output
+    assert "Warning: transcript not found at" in result.output
+    updated = store.load_one("session-1")
+    assert updated is not None
+    assert updated.identities is not None
+    assert updated.identities[0].name == "Helene Golombek"
+    assert updated.identities[0].confidence == "voice_profile"
+    assert updated.identities[0].review_queued is False
+    assert queue.load() == []
+    assert refreshed_paths == [tmp_path / "missing.md"]
 
 
 def test_refresh_summary_for_job_appends_history(tmp_path: Path, monkeypatch):
