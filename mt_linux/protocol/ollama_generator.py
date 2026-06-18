@@ -36,6 +36,10 @@ class OllamaProtocolGenerator(ProtocolGenerator):
             payload["device"] = "cuda"
         else:
             payload["device"] = "cpu"
+        if self.config.use_gpu:
+            payload["device"] = "cuda"
+        else:
+            payload["device"] = "cpu"
         response = httpx.post(self.config.endpoint, json=payload, timeout=300)
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
