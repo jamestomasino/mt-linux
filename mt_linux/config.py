@@ -69,6 +69,7 @@ class ProtocolConfig:
     model: str = "llama3.1"
     prompt_path: str = ""
     language: str = "en"
+    use_gpu: bool = True  # New configuration option for GPU usage
 
 
 @dataclass
