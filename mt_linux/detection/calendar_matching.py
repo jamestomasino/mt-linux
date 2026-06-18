@@ -5,6 +5,9 @@ from datetime import datetime
 from mt_linux.models import CalendarEvent, MeetingInfo
 
 
+MIN_AUTO_MATCH_REMAINING_SECONDS = 120
+
+
 APP_CONFERENCING_MAP = {
     "zoom": "zoom",
     "teams": "teams",
@@ -26,13 +29,23 @@ def choose_calendar_event(
         )
         return None, plausible, "none"
 
+    eligible = [
+        item for item in filtered if _eligible_for_auto_match(meeting_info, item)
+    ]
+    if not eligible:
+        plausible = sorted(
+            filtered,
+            key=lambda item: _score_candidate(meeting_info, item),
+            reverse=True,
+        )
+        return None, plausible, "none"
+
     scored = sorted(
-        filtered,
+        eligible,
         key=lambda item: _score_candidate(meeting_info, item),
         reverse=True,
     )
     top = scored[0]
-    top_score = _score_candidate(meeting_info, top)
     plausible = [
         item
         for item in scored
@@ -49,6 +62,11 @@ def _score_candidate(meeting_info: MeetingInfo, candidate: CalendarEvent) -> tup
     accepted = int(candidate.response_status == "accepted")
     proximity = -int(abs((candidate.start_time - meeting_info.start_time).total_seconds()))
     return platform_match, accepted, proximity
+
+
+def _eligible_for_auto_match(meeting_info: MeetingInfo, candidate: CalendarEvent) -> bool:
+    remaining_seconds = (candidate.end_time - meeting_info.start_time).total_seconds()
+    return remaining_seconds >= MIN_AUTO_MATCH_REMAINING_SECONDS
 
 
 def _same_strength(meeting_info: MeetingInfo, top: CalendarEvent, other: CalendarEvent) -> bool:

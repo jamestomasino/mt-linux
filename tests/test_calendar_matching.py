@@ -75,3 +75,56 @@ def test_choose_calendar_event_prefers_accepted_zoom_and_marks_ties_ambiguous():
     assert chosen is not None
     assert confidence == "ambiguous"
     assert len(candidates) == 2
+
+
+def test_choose_calendar_event_does_not_auto_match_event_that_is_effectively_over():
+    meeting = MeetingInfo(
+        app="teams",
+        pid=1,
+        detection_method="pipewire",
+        start_time=datetime(2026, 6, 11, 16, 59, 54, tzinfo=UTC),
+    )
+    event = CalendarEvent(
+        event_id="xhance",
+        title="XHANCE DTC Paid Social Kick-off",
+        start_time=datetime(2026, 6, 11, 16, 0, tzinfo=UTC),
+        end_time=datetime(2026, 6, 11, 17, 0, tzinfo=UTC),
+        conferencing_url="https://teams.microsoft.com/meet/1",
+        conferencing_type="teams",
+        response_status="accepted",
+    )
+    chosen, candidates, confidence = choose_calendar_event(meeting, [event])
+    assert chosen is None
+    assert candidates == [event]
+    assert confidence == "none"
+
+
+def test_choose_calendar_event_prefers_later_eligible_event_over_near_ended_event():
+    meeting = MeetingInfo(
+        app="teams",
+        pid=1,
+        detection_method="pipewire",
+        start_time=datetime(2026, 6, 11, 16, 59, 54, tzinfo=UTC),
+    )
+    near_ended = CalendarEvent(
+        event_id="xhance",
+        title="XHANCE DTC Paid Social Kick-off",
+        start_time=datetime(2026, 6, 11, 16, 0, tzinfo=UTC),
+        end_time=datetime(2026, 6, 11, 17, 0, tzinfo=UTC),
+        conferencing_url="https://teams.microsoft.com/meet/1",
+        conferencing_type="teams",
+        response_status="accepted",
+    )
+    eligible = CalendarEvent(
+        event_id="strategy",
+        title="Internal Strategy Discussion",
+        start_time=datetime(2026, 6, 11, 17, 0, tzinfo=UTC),
+        end_time=datetime(2026, 6, 11, 18, 0, tzinfo=UTC),
+        conferencing_url="https://teams.microsoft.com/meet/2",
+        conferencing_type="teams",
+        response_status="accepted",
+    )
+    chosen, candidates, confidence = choose_calendar_event(meeting, [near_ended, eligible])
+    assert chosen == eligible
+    assert candidates == [eligible]
+    assert confidence == "matched"
