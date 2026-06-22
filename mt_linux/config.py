@@ -43,7 +43,7 @@ class CalendarConfig:
 class TranscriptionConfig:
     engine: str = "faster-whisper"
     model: str = "large-v3-turbo"
-    device: str = "cpu"
+    device: str = "auto"
     compute_type: str = "int8"
     language: str = ""
 
@@ -69,8 +69,7 @@ class ProtocolConfig:
     model: str = "llama3.1"
     prompt_path: str = ""
     language: str = "en"
-    use_gpu: bool = True  # New configuration option for GPU usage
-    use_gpu: bool = True  # New configuration option for GPU usage
+    use_gpu: bool = True
 
 
 @dataclass

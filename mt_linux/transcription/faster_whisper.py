@@ -5,6 +5,7 @@ from pathlib import Path
 from mt_linux.config import TranscriptionConfig
 from mt_linux.models import TranscriptSegment
 from mt_linux.transcription.engine import TranscribingEngine
+from mt_linux.transcription.runtime import resolve_device
 
 
 class FasterWhisperEngine(TranscribingEngine):
@@ -15,9 +16,10 @@ class FasterWhisperEngine(TranscribingEngine):
             raise RuntimeError(
                 "faster-whisper is not installed. Install the transcription extras to enable ASR."
             ) from exc
+        device = resolve_device(config.device)
         self.model = WhisperModel(
             config.model,
-            device=config.device,
+            device=device,
             compute_type=config.compute_type,
         )
 

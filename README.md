@@ -149,6 +149,7 @@ Common settings:
 - `calendar.backend`: `google`, `caldav`, or `none`
 - `calendar.lookup_window_minutes`: candidate lookup window
 - `transcription.model`: Whisper model name
+- `transcription.device`: `auto`, `cuda`, or `cpu`
 - `diarization.hf_token`: Hugging Face token for pyannote
 - `protocol.enabled`: enable or disable local LLM summary generation
 

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 
 from mt_linux.config import AppConfig
+from mt_linux.transcription.runtime import cuda_available, resolve_device
 
 
 @dataclass
@@ -70,6 +71,27 @@ def _check_transcription_runtime(config: AppConfig) -> list[CheckResult]:
         results.append(CheckResult("transcription.engine", "warn", f"Unsupported engine: {config.transcription.engine}"))
     else:
         results.append(CheckResult("transcription.engine", "ok", config.transcription.model))
+    requested_device = config.transcription.device
+    resolved_device = resolve_device(requested_device)
+    if requested_device.strip().lower() == "cpu" and cuda_available():
+        results.append(
+            CheckResult(
+                "transcription.device",
+                "warn",
+                'Configured for cpu while CUDA is available. Set transcription.device to "auto" or "cuda".',
+            )
+        )
+    elif requested_device.strip().lower() == "cuda" and not cuda_available():
+        results.append(
+            CheckResult(
+                "transcription.device",
+                "warn",
+                'Configured for cuda but CUDA is not available. Falling back requires transcription.device = "auto" or "cpu".',
+            )
+        )
+    else:
+        detail = f"{requested_device or 'auto'} -> {resolved_device}"
+        results.append(CheckResult("transcription.device", "ok", detail))
     return results
 
 
