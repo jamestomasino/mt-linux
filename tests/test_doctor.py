@@ -32,6 +32,7 @@ def test_run_doctor_reports_missing_runtime_bits(tmp_path: Path, monkeypatch):
     assert by_name["calendar.caldav_url"].status == "warn"
     assert by_name["output.folder"].status == "ok"
     assert by_name["transcription.device"].status == "ok"
+    assert by_name["diarization.device"].detail == "cpu"
 
 
 def test_run_doctor_warns_when_cuda_available_but_transcription_pinned_to_cpu(tmp_path: Path, monkeypatch):
@@ -47,3 +48,4 @@ def test_run_doctor_warns_when_cuda_available_but_transcription_pinned_to_cpu(tm
     results = run_doctor(config)
     by_name = {item.name: item for item in results}
     assert by_name["transcription.device"].status == "warn"
+    assert by_name["diarization.device"].detail == "cuda"

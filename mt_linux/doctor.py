@@ -102,6 +102,13 @@ def _check_diarization_runtime(config: AppConfig) -> list[CheckResult]:
         return results
     results.append(_module_check("diarization.pyannote", "pyannote.audio", required=True))
     results.append(_module_check("diarization.resemblyzer", "resemblyzer", required=True))
+    results.append(
+        CheckResult(
+            "diarization.device",
+            "ok",
+            "cuda" if cuda_available() else "cpu",
+        )
+    )
     if config.diarization.hf_token:
         results.append(CheckResult("diarization.hf_token", "ok", "Configured"))
     else:

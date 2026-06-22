@@ -5,6 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
+from mt_linux.transcription.runtime import resolve_device
+
 
 class SpeakerMatcher:
     def __init__(self, db_path: Path, similarity_threshold: float = 0.82):
@@ -42,7 +44,7 @@ class SpeakerMatcher:
             raise RuntimeError(
                 "resemblyzer is not installed. Install the diarization extras to enable speaker enrollment."
             ) from exc
-        encoder = VoiceEncoder(device="cpu")
+        encoder = VoiceEncoder(device=resolve_device("auto"))
         wav = preprocess_wav(str(wav_path))
         embedding = encoder.embed_utterance(wav)
         norm = np.linalg.norm(embedding)

@@ -9,6 +9,12 @@ def cuda_available() -> bool:
     return bool(torch.cuda.is_available())
 
 
+def preferred_torch_device():
+    import torch
+
+    return torch.device("cuda" if cuda_available() else "cpu")
+
+
 def resolve_device(requested: str) -> str:
     normalized = requested.strip().lower()
     if normalized in {"", "auto"}:

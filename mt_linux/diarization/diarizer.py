@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from mt_linux.transcription.runtime import preferred_torch_device
+
 
 @dataclass
 class DiarizationSegment:
@@ -24,7 +26,7 @@ class PyannoteDiarizer:
             "pyannote/speaker-diarization-3.1",
             token=hf_token,
         )
-        self.pipeline.to(torch.device("cpu"))
+        self.pipeline.to(preferred_torch_device())
         self.num_speakers = num_speakers
 
     def diarize(self, audio_path: Path) -> list[DiarizationSegment]:
