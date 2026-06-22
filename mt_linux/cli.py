@@ -8,11 +8,12 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+from tempfile import TemporaryDirectory
 import uuid
 
 import click
 
-from mt_linux.audio.wav import wav_duration_minutes
+from mt_linux.audio.wav import extract_wav_clip, wav_duration_minutes
 from mt_linux.bootstrap import bootstrap_local_config
 from mt_linux.cleanup import cleanup_runtime_artifacts
 from mt_linux.config import AppConfig
@@ -37,6 +38,7 @@ from mt_linux.output.transcript_patch import (
 )
 from mt_linux.paths import STATE_FILE, ensure_directories
 from mt_linux.pipeline.job import JobStatus, PipelineJob
+from mt_linux.pipeline.identity import _best_sample_segment
 from mt_linux.pipeline.job_admin import remove_job, retry_job
 from mt_linux.pipeline.meeting_review_queue import MeetingReviewQueue
 from mt_linux.pipeline.snapshot import JobSnapshotStore
@@ -294,6 +296,92 @@ def cleanup(dry_run: bool, include_job_history: bool) -> None:
             click.echo(f"{'Would remove' if dry_run else 'Removed'} artifact: {path}")
     if not result.removed_job_snapshots and not result.removed_paths:
         click.echo("Nothing to clean up.")
+
+
+@cli.command("backfill-speaker-profiles")
+@click.option("--dry-run", is_flag=True, help="Show how many historical clips would be added without writing profiles.")
+def backfill_speaker_profiles(dry_run: bool) -> None:
+    """Rebuild speaker profiles from historical confirmed identities."""
+    current = AppConfig.load()
+    store = JobSnapshotStore()
+    matcher = SpeakerMatcher(
+        current.resolve_path(current.speakers.db_path),
+        current.speakers.similarity_threshold,
+    )
+    eligible_confidences = {"voice_profile", "manual_correction"}
+    scanned_jobs = 0
+    updated_profiles = 0
+    added_clips = 0
+    skipped_missing_audio = 0
+    skipped_missing_segment = 0
+    skipped_embedding_failures = 0
+
+    for job in store.load_all():
+        scanned_jobs += 1
+        if not job.identities or not job.diarization_segments:
+            continue
+        source_audio_path = _historical_identity_audio_path(job)
+        if source_audio_path is None or not source_audio_path.exists():
+            matching_identities = [
+                identity
+                for identity in job.identities
+                if identity.confidence in eligible_confidences and identity.label != identity.name
+            ]
+            skipped_missing_audio += len(matching_identities)
+            continue
+        for identity in job.identities:
+            if identity.confidence not in eligible_confidences:
+                continue
+            if identity.label == identity.name:
+                continue
+            best_segment = _best_sample_segment(
+                identity.label,
+                [segment for segment in (job.transcript_segments or []) if segment.speaker == identity.label],
+                job.diarization_segments,
+            )
+            if best_segment is None:
+                skipped_missing_segment += 1
+                continue
+            updated_profiles += int(identity.name not in matcher.db)
+            with TemporaryDirectory(prefix="mt-linux-backfill-") as temp_dir:
+                clip_path = Path(temp_dir) / f"{job.session_id}_{identity.label}.wav"
+                extract_wav_clip(source_audio_path, clip_path, best_segment.start, best_segment.end)
+                if dry_run:
+                    added_clips += 1
+                    continue
+                try:
+                    embedding = matcher.embed_wav(clip_path)
+                except RuntimeError:
+                    skipped_embedding_failures += 1
+                    continue
+                matcher.update_profile(identity.name, embedding)
+                added_clips += 1
+
+    click.echo(
+        f"{'Would backfill' if dry_run else 'Backfilled'} {added_clips} clip(s) "
+        f"across {scanned_jobs} job(s)."
+    )
+    click.echo(f"New profiles discovered: {updated_profiles}")
+    if skipped_missing_audio:
+        click.echo(f"Skipped {skipped_missing_audio} candidate clip(s) with missing source audio.")
+    if skipped_missing_segment:
+        click.echo(f"Skipped {skipped_missing_segment} candidate clip(s) without a usable segment.")
+    if skipped_embedding_failures:
+        click.echo(f"Skipped {skipped_embedding_failures} candidate clip(s) due to embedding errors.")
+
+
+def _historical_identity_audio_path(job: PipelineJob) -> Path | None:
+    if job.app_transcript_segments is not None:
+        return job.app_audio_path
+    if job.imported_audio_path is not None:
+        return job.imported_audio_path
+    if job.app_audio_path.exists() and job.mic_audio_path.exists():
+        if job.app_audio_path.resolve() == job.mic_audio_path.resolve():
+            return job.app_audio_path
+        mix_path = job.app_audio_path.with_name(f"{job.session_id}_mix.wav")
+        if mix_path.exists():
+            return mix_path
+    return None
 
 
 @cli.group()
