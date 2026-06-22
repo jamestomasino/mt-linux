@@ -518,6 +518,61 @@ Old summary
     assert updated.identities[0].review_queued is False
 
 
+def test_review_run_updates_speaker_profile_from_confirmed_review(tmp_path: Path, monkeypatch):
+    transcript = tmp_path / "meeting.md"
+    transcript.write_text(
+        """---
+title: "Meeting"
+---
+
+## Transcript
+
+**14:30:00** SPEAKER_01: Hello there
+""",
+        encoding="utf-8",
+    )
+    sample = tmp_path / "sample.wav"
+    sample.write_bytes(b"wav")
+    queue = ReviewQueue(tmp_path / "review_queue.json")
+    queue.add(
+        ReviewEntry(
+            session_id="session-1",
+            speaker_label="SPEAKER_01",
+            sample_path=sample,
+            calendar_attendees=[],
+            meeting_title="Meeting",
+            meeting_date=datetime(2026, 6, 9).date(),
+            transcript_path=transcript,
+        )
+    )
+    cfg = AppConfig()
+    cfg.speakers.db_path = str(tmp_path / "speakers.json")
+    profile_updates: list[tuple[str, object]] = []
+
+    class _FakeMatcher:
+        def __init__(self, db_path, similarity_threshold):
+            self.db_path = db_path
+            self.similarity_threshold = similarity_threshold
+
+        def embed_wav(self, wav_path):
+            assert wav_path == sample
+            return [1.0, 0.0]
+
+        def update_profile(self, name, embedding):
+            profile_updates.append((name, embedding))
+
+    monkeypatch.setattr("mt_linux.cli.ReviewQueue", lambda: queue)
+    monkeypatch.setattr("mt_linux.cli.AppConfig.load", lambda: cfg)
+    monkeypatch.setattr("mt_linux.cli.SpeakerMatcher", _FakeMatcher)
+    monkeypatch.setattr("mt_linux.cli._play_sample", lambda _path: None)
+    monkeypatch.setattr("mt_linux.cli._refresh_job_summary", lambda *_args, **_kwargs: True)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["review", "run"], input="Alice Smith\n", env={})
+    assert result.exit_code == 0
+    assert "Identified as Alice Smith" in result.output
+    assert profile_updates == [("Alice Smith", [1.0, 0.0])]
+
+
 def test_review_run_warns_when_transcript_is_missing(tmp_path: Path, monkeypatch):
     sample = tmp_path / "sample.wav"
     sample.write_bytes(b"wav")

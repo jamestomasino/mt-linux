@@ -24,7 +24,7 @@ from mt_linux.detection.google_auth import run_google_auth
 from mt_linux.diarization.speaker_matcher import SpeakerMatcher
 from mt_linux.doctor import run_doctor, summarize_results
 from mt_linux.enrichment.service import enrich_note, entity_notes_root, sync_entity_catalog
-from mt_linux.models import Attendee, CalendarEvent, MeetingInfo, MeetingReviewEntry
+from mt_linux.models import Attendee, CalendarEvent, MeetingInfo, MeetingReviewEntry, ReviewEntry
 from mt_linux.output.enrichment_patch import apply_note_enrichment
 from mt_linux.output.markdown import output_path_for, slugify
 from mt_linux.output.note_content import parse_note_content
@@ -403,6 +403,10 @@ def review_run(session_id: str) -> None:
             else:
                 action_message = f"Identified as {choice} (transcript missing; skipped note update)"
         _apply_review_choice_to_job(store, entry, choice)
+        if choice.lower() != "x":
+            warning = _update_speaker_profile_from_review(current, entry, choice)
+            if warning:
+                click.echo(warning)
         queue.remove(entry.session_id, entry.speaker_label)
         if entry.sample_path.exists():
             entry.sample_path.unlink()
@@ -462,6 +466,21 @@ def _apply_review_choice_to_job(store: JobSnapshotStore, entry: ReviewEntry, cho
         else f"Speaker review: identified {entry.speaker_label} as {choice}"
     )
     store.save(job)
+
+
+def _update_speaker_profile_from_review(config: AppConfig, entry: ReviewEntry, choice: str) -> str:
+    if not entry.sample_path.exists():
+        return ""
+    matcher = SpeakerMatcher(
+        config.resolve_path(config.speakers.db_path),
+        config.speakers.similarity_threshold,
+    )
+    try:
+        embedding = matcher.embed_wav(entry.sample_path)
+    except RuntimeError as exc:
+        return f"Warning: could not update speaker profile for {choice}: {exc}"
+    matcher.update_profile(choice, embedding)
+    return ""
 
 
 @cli.group("review-meetings", invoke_without_command=True)
