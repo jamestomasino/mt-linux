@@ -152,6 +152,7 @@ Common settings:
 - `transcription.device`: `auto`, `cuda`, or `cpu`
 - `diarization.hf_token`: Hugging Face token for pyannote
 - `protocol.enabled`: enable or disable local LLM summary generation
+- `output.keep_audio`: keep captured WAV files after processing and review complete
 
 Audio capture behavior:
 
@@ -329,7 +330,7 @@ Generated notes are Markdown files with YAML frontmatter intended for Obsidian. 
 
 The transcript body includes timestamped speaker turns and optional LLM-generated summary sections.
 
-Recorded app audio and mic audio are kept as separate WAV files. For transcription and diarization, `mt-linux` mixes those tracks into a temporary processing WAV so both your voice and remote participants are present in the transcript path.
+Recorded app audio and mic audio are captured as separate WAV files. For transcription and diarization, `mt-linux` mixes those tracks into a temporary processing WAV so both your voice and remote participants are present in the transcript path. By default, recorder-managed WAVs are deleted automatically after queue processing completes and no speaker review is still pending. Set `output.keep_audio = true` to retain them.
 
 ## Runtime Notes
 

@@ -16,3 +16,8 @@ def test_expand_path_resolves_env_and_home(monkeypatch):
 def test_speaker_db_defaults_to_xdg_data_dir():
     config = AppConfig()
     assert config.speakers.db_path == str(DATA_DIR / "speakers.json")
+
+
+def test_output_audio_is_deleted_by_default_after_processing():
+    config = AppConfig()
+    assert config.output.keep_audio is False

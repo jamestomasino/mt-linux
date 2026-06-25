@@ -24,11 +24,18 @@ class FasterWhisperEngine(TranscribingEngine):
         )
 
     def transcribe(self, audio_path: Path, language: str | None = None) -> list[TranscriptSegment]:
+        vad_parameters = (
+            {"min_silence_duration_ms": 500}
+            if self.config.chunking_strategy == "vad"
+            else None
+        )
         segments, _info = self.model.transcribe(
             str(audio_path),
             language=language,
+            beam_size=self.config.beam_size,
             word_timestamps=True,
             vad_filter=True,
+            vad_parameters=vad_parameters,
             condition_on_previous_text=False,
         )
         return [

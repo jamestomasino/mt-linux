@@ -8,8 +8,20 @@ import numpy as np
 from mt_linux.transcription.runtime import resolve_device
 
 
+# Singleton VoiceEncoder — loaded once, reused across all calls.
+_ENCODER = None
+
+
+def _get_encoder():
+    global _ENCODER
+    if _ENCODER is None:
+        from resemblyzer import VoiceEncoder
+        _ENCODER = VoiceEncoder(device=resolve_device("auto"))
+    return _ENCODER
+
+
 class SpeakerMatcher:
-    def __init__(self, db_path: Path, similarity_threshold: float = 0.82):
+    def __init__(self, db_path: Path, similarity_threshold: float = 0.75):
         self.db_path = db_path
         self.similarity_threshold = similarity_threshold
         self.db = self._load()
@@ -39,16 +51,31 @@ class SpeakerMatcher:
 
     def embed_wav(self, wav_path: Path) -> np.ndarray:
         try:
-            from resemblyzer import VoiceEncoder, preprocess_wav
+            from resemblyzer import preprocess_wav
         except ImportError as exc:
             raise RuntimeError(
                 "resemblyzer is not installed. Install the diarization extras to enable speaker enrollment."
             ) from exc
-        encoder = VoiceEncoder(device=resolve_device("auto"))
+        encoder = _get_encoder()
         wav = preprocess_wav(str(wav_path))
         embedding = encoder.embed_utterance(wav)
         norm = np.linalg.norm(embedding)
         return embedding / norm if norm else embedding
+
+    def embed_multiple(self, wav_paths: list[Path]) -> np.ndarray | None:
+        """Average embeddings from multiple clips for a more stable speaker profile."""
+        embeddings: list[np.ndarray] = []
+        for path in wav_paths:
+            try:
+                emb = self.embed_wav(path)
+                embeddings.append(emb)
+            except Exception:
+                continue
+        if not embeddings:
+            return None
+        averaged = np.mean(embeddings, axis=0)
+        norm = np.linalg.norm(averaged)
+        return averaged / norm if norm else averaged
 
     def _load(self) -> dict:
         if not self.db_path.exists():

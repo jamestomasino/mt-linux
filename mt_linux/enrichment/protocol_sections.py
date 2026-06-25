@@ -1,22 +1,47 @@
 from __future__ import annotations
 
+import json
+import logging
 import re
 
+from mt_linux.config import AppConfig
 from mt_linux.enrichment.models import ActionItem, NoteEnrichment
 
+logger = logging.getLogger(__name__)
 
 _HEADING_RE = re.compile(r"^\*\*(Summary|Decisions|Action Items)\*\*\s*$", re.MULTILINE)
 _BULLET_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+(.*)$")
 _URL_RE = re.compile(r"https?://\S+")
 
+_LLM_ENRICHMENT_PROMPT = """Extract structured data from this meeting summary and transcript.
+Return ONLY valid JSON with these keys: key_points, decisions, action_items, open_questions.
+Each should be an array of strings. action_items should be an array of objects with "text" and "owner" keys.
+If a section is not present, use an empty array.
 
-def extract_protocol_enrichment(summary: str, transcript: str) -> NoteEnrichment:
+Summary:
+{summary}
+
+Transcript:
+{transcript}
+"""
+
+
+def extract_protocol_enrichment(
+    summary: str,
+    transcript: str,
+    config: AppConfig | None = None,
+) -> NoteEnrichment:
     sections = _split_protocol_sections(summary)
     key_points = _extract_list_items(sections.get("Summary", ""))
-    if not key_points and sections.get("Summary", "").strip():
-        key_points = _sentences(sections["Summary"])
     decisions = _extract_list_items(sections.get("Decisions", ""))
     action_items = [_parse_action_item(item) for item in _extract_list_items(sections.get("Action Items", ""))]
+
+    # If regex extraction got nothing useful, try LLM fallback.
+    if not key_points and not decisions and not action_items and config is not None:
+        llm_result = _try_llm_enrichment(summary, transcript, config)
+        if llm_result is not None:
+            key_points, decisions, action_items = llm_result
+
     links = sorted(set(_URL_RE.findall(f"{summary}\n{transcript}")))
     open_questions = _extract_open_questions(transcript)
     tags = _derive_tags(key_points, decisions, action_items)
@@ -102,3 +127,51 @@ def _derive_tags(
 def _sentences(text: str) -> list[str]:
     parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
     return parts[:6]
+
+
+def _try_llm_enrichment(
+    summary: str,
+    transcript: str,
+    config: AppConfig,
+) -> tuple[list[str], list[str], list[ActionItem]] | None:
+    """Fallback: use OpenAI-compatible endpoint to extract structured enrichment data."""
+    openai_cfg = config.openai
+    if not openai_cfg.enabled or not openai_cfg.api_key:
+        return None
+
+    prompt = _LLM_ENRICHMENT_PROMPT.format(
+        summary=summary[:4000],
+        transcript=transcript[:6000],
+    )
+    payload = {
+        "model": openai_cfg.model or "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": "You are a structured data extraction assistant. Return only valid JSON."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0,
+    }
+    try:
+        import httpx
+
+        response = httpx.post(
+            openai_cfg.endpoint,
+            json=payload,
+            timeout=120,
+            headers={"Authorization": f"Bearer {openai_cfg.api_key}"},
+        )
+        response.raise_for_status()
+        data = response.json()["choices"][0]["message"]["content"]
+        parsed = json.loads(data)
+        key_points = parsed.get("key_points", [])
+        decisions = parsed.get("decisions", [])
+        raw_actions = parsed.get("action_items", [])
+        action_items = [
+            ActionItem(text=item.get("text", ""), owner=item.get("owner", ""))
+            for item in raw_actions
+            if isinstance(item, dict) and item.get("text")
+        ]
+        return key_points, decisions, action_items
+    except Exception:
+        logger.debug("LLM enrichment fallback failed", exc_info=True)
+        return None

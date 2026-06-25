@@ -234,12 +234,18 @@ def _transcript_body(
 
 
 def _merge_speaker_turns(segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
+    """Merge consecutive same-speaker segments, but break on gaps > 10 seconds."""
+    MAX_GAP = 10.0
     turns: list[TranscriptSegment] = []
     for segment in segments:
         text = segment.text.strip()
         if not text:
             continue
-        if turns and turns[-1].speaker == segment.speaker:
+        if (
+            turns
+            and turns[-1].speaker == segment.speaker
+            and (segment.start - turns[-1].end) <= MAX_GAP
+        ):
             turns[-1].end = segment.end
             turns[-1].text = f"{turns[-1].text} {text}".strip()
             continue
@@ -253,6 +259,30 @@ def _merge_speaker_turns(segments: list[TranscriptSegment]) -> list[TranscriptSe
             )
         )
     return turns
+
+
+def _compute_transcription_confidence(
+    segments: list[TranscriptSegment],
+) -> float:
+    """Average logprob-based confidence across all transcript segments.
+
+    Whisper avg_logprob ranges from -inf (very uncertain) to 0 (certain).
+    Values above -0.5 are excellent, below -1.0 are poor.
+    We map to 0-100 for readability in frontmatter.
+    """
+    confidences = [
+        s.confidence
+        for s in segments
+        if s.confidence is not None and s.text.strip()
+    ]
+    if not confidences:
+        return 0.0
+    avg = sum(confidences) / len(confidences)
+    # Sigmoid-ish mapping: -2.0 -> ~12%, -1.0 -> ~27%, -0.5 -> ~38%, 0 -> 50%
+    # But Whisper logprobs are typically -0.3 to -2.0 for decent transcripts.
+    # Clamp and scale to a more useful 0-100 range.
+    clamped = max(-3.0, min(0.0, avg))
+    return round((clamped + 3.0) / 3.0 * 100, 1)
 
 
 def _relative_audio_paths(paths: list[Path], config: AppConfig) -> list[str]:

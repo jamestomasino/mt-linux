@@ -18,9 +18,14 @@ from mt_linux.enrichment.service import enrich_note
 from mt_linux.models import SpeakerIdentity
 from mt_linux.models import TranscriptSegment
 from mt_linux.notifications import notify
-from mt_linux.output.markdown import output_path_for, render_meeting_markdown
+from mt_linux.output.markdown import (
+    _compute_transcription_confidence,
+    output_path_for,
+    render_meeting_markdown,
+)
 from mt_linux.paths import STATE_FILE, ensure_directories
 from mt_linux.pipeline.identity import assign_speakers_to_transcript, resolve_identities
+from mt_linux.pipeline.job_admin import cleanup_completed_job_audio
 from mt_linux.pipeline.job import JobStatus, PipelineJob
 from mt_linux.pipeline.meeting_review_queue import MeetingReviewQueue
 from mt_linux.pipeline.queue import PipelineQueue
@@ -84,7 +89,9 @@ class MeetingPipeline:
             return
         if job.enrichment is None:
             transcript_text = "\n".join(f"{segment.speaker}: {segment.text}" for segment in transcript_segments if segment.text.strip())
-            job.enrichment = await asyncio.to_thread(enrich_note, job.summary or "", transcript_text, self.config)
+            job.enrichment = await asyncio.to_thread(
+                enrich_note, job.summary or "", transcript_text, self.config
+            )
             job.add_event("Note enrichment generated")
             self.store.save(job)
             return
@@ -95,6 +102,7 @@ class MeetingPipeline:
             identities=job.identities or [],
             summary=job.summary or "",
             enrichment=job.enrichment,
+            transcription_confidence=_compute_transcription_confidence(transcript_segments),
         )
         job.set_status(JobStatus.WRITING_OUTPUT, "Writing markdown output")
         self.store.save(job)
@@ -112,6 +120,11 @@ class MeetingPipeline:
                 "Meeting Transcriber",
                 f"Ambiguous calendar match for '{job.meeting_info.title or job.session_id}'. Run mt-ctl review-meetings.",
             )
+        cleanup_completed_job_audio(
+            job,
+            keep_audio=self.config.output.keep_audio,
+            review_queue=self.review_queue,
+        )
 
     def _transcribe(self, job: PipelineJob) -> list[TranscriptSegment]:
         job.set_status(JobStatus.TRANSCRIBING, "Transcription started")
@@ -154,10 +167,23 @@ class MeetingPipeline:
             return []
         audio_path = self._diarization_audio_path(job)
         try:
-            diarizer = PyannoteDiarizer(self.config.diarization.hf_token)
+            num_speakers = self._estimate_num_speakers(job)
+            diarizer = PyannoteDiarizer(
+                self.config.diarization.hf_token,
+                num_speakers=num_speakers,
+            )
         except RuntimeError:
             return []
         return diarizer.diarize(audio_path)
+
+    def _estimate_num_speakers(self, job: PipelineJob) -> int | None:
+        """Estimate speaker count from calendar attendees + mic speaker."""
+        event = job.meeting_info.calendar_event
+        if event and event.attendees:
+            # Unique attendee names + 1 for the local mic speaker.
+            unique = {a.name.strip().lower() for a in event.attendees if a.name.strip()}
+            return max(len(unique) + 1, 2)
+        return None
 
     def _generate_protocol(self, job: PipelineJob, segments: list[TranscriptSegment]) -> str:
         job.set_status(JobStatus.GENERATING_PROTOCOL, "Protocol generation started")

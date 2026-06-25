@@ -70,6 +70,7 @@ def test_pipeline_process_uses_speaker_profiles_before_review(tmp_path: Path, mo
     audio_path = write_test_wav(tmp_path / "input.wav", seconds=3)
     config = AppConfig()
     config.output.folder = str(tmp_path / "out")
+    config.output.keep_audio = False
     store = JobSnapshotStore(tmp_path / "jobs")
     pipeline = MeetingPipeline(config, store=store)
     pipeline.review_queue = ReviewQueue(tmp_path / "review_queue.json")
@@ -77,11 +78,10 @@ def test_pipeline_process_uses_speaker_profiles_before_review(tmp_path: Path, mo
         session_id="session-2",
         app_audio_path=audio_path,
         mic_audio_path=audio_path,
-        imported_audio_path=audio_path,
         meeting_info=MeetingInfo(
             app="zoom",
             pid=1,
-            detection_method="import",
+            detection_method="pipewire",
             start_time=datetime(2026, 6, 7, 14, 30, tzinfo=UTC),
             title="Weekly Standup",
         ),
@@ -115,6 +115,7 @@ def test_pipeline_process_uses_speaker_profiles_before_review(tmp_path: Path, mo
     assert "[[Alice Smith]]" in content
     assert "voice_profile" in content
     assert pipeline.review_queue.load() == []
+    assert not audio_path.exists()
 
 
 def test_pipeline_process_queues_ambiguous_meeting_review(tmp_path: Path, monkeypatch):
@@ -182,6 +183,44 @@ def test_pipeline_process_queues_ambiguous_meeting_review(tmp_path: Path, monkey
     assert entries[0].selected_event_id == "event-1"
     assert entries[0].app == "zoom"
     assert entries[0].transcript_preview == ["SPEAKER_00: Hello"]
+
+
+def test_pipeline_process_keeps_audio_until_speaker_review_is_resolved(tmp_path: Path, monkeypatch):
+    audio_path = write_test_wav(tmp_path / "input.wav", seconds=3)
+    config = AppConfig()
+    config.output.folder = str(tmp_path / "out")
+    config.output.keep_audio = False
+    store = JobSnapshotStore(tmp_path / "jobs")
+    pipeline = MeetingPipeline(config, store=store)
+    pipeline.review_queue = ReviewQueue(tmp_path / "review_queue.json")
+    job = PipelineJob(
+        session_id="session-review",
+        app_audio_path=audio_path,
+        mic_audio_path=audio_path,
+        imported_audio_path=None,
+        meeting_info=MeetingInfo(
+            app="zoom",
+            pid=1,
+            detection_method="pipewire",
+            start_time=datetime(2026, 6, 7, 14, 30, tzinfo=UTC),
+            title="Weekly Standup",
+        ),
+    )
+
+    monkeypatch.setattr(pipeline, "_transcribe", lambda _job: [TranscriptSegment(start=0.0, end=1.0, text="Hello")])
+    monkeypatch.setattr(
+        pipeline,
+        "_diarize",
+        lambda _job: [DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_01")],
+    )
+    monkeypatch.setattr(pipeline, "_generate_protocol", lambda _job, _segments: "Summary text")
+    monkeypatch.setattr("mt_linux.daemon.notify", lambda *args, **kwargs: None)
+
+    asyncio.run(_run_job_to_completion(pipeline, job))
+
+    assert job.status == JobStatus.COMPLETE
+    assert audio_path.exists()
+    assert len(pipeline.review_queue.load()) == 1
 
 
 def test_pipeline_process_writes_output_when_diarization_fails(tmp_path: Path, monkeypatch):

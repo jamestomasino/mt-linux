@@ -24,6 +24,7 @@ def run_doctor(config: AppConfig) -> list[CheckResult]:
     results.extend(_check_transcription_runtime(config))
     results.extend(_check_diarization_runtime(config))
     results.extend(_check_calendar_runtime(config))
+    results.extend(_check_protocol_runtime(config))
     return results
 
 
@@ -138,6 +139,53 @@ def _check_calendar_runtime(config: AppConfig) -> list[CheckResult]:
         results.append(CheckResult("calendar.caldav_url", status, detail))
         return results
     return [CheckResult("calendar.backend", "warn", f"Unknown backend: {config.calendar.backend}")]
+
+
+def _check_protocol_runtime(config: AppConfig) -> list[CheckResult]:
+    results: list[CheckResult] = []
+    if not config.protocol.enabled:
+        results.append(CheckResult("protocol.enabled", "warn", "Protocol generation disabled"))
+        return results
+    ollama_bin = shutil.which("ollama")
+    results.append(
+        CheckResult("protocol.ollama_bin", "ok" if ollama_bin else "warn", ollama_bin or "ollama not found on PATH")
+    )
+    if not ollama_bin:
+        return results
+    # Check that the endpoint responds.
+    from mt_linux.protocol.ollama_service import _check_endpoint
+
+    if _check_endpoint(config.protocol.endpoint):
+        results.append(CheckResult("protocol.endpoint", "ok", config.protocol.endpoint))
+    else:
+        results.append(
+            CheckResult(
+                "protocol.endpoint",
+                "warn",
+                f"Endpoint {config.protocol.endpoint} not responding. It will be launched on-demand when needed.",
+            )
+        )
+    # Check model availability.
+    try:
+        result = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0 and config.protocol.model in result.stdout:
+            results.append(CheckResult("protocol.model", "ok", config.protocol.model))
+        else:
+            results.append(
+                CheckResult(
+                    "protocol.model",
+                    "warn",
+                    f"Model '{config.protocol.model}' not found locally. It will be pulled on first use.",
+                )
+            )
+    except subprocess.TimeoutExpired:
+        results.append(CheckResult("protocol.model", "warn", "Timeout checking ollama models"))
+    return results
 
 
 def _module_check(name: str, module_name: str, required: bool) -> CheckResult:

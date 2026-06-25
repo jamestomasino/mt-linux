@@ -10,7 +10,7 @@ from mt_linux.enrichment.vault_entities import default_entity_notes_root, write_
 
 
 def enrich_note(summary: str, transcript: str, config: AppConfig) -> NoteEnrichment:
-    enrichment = extract_protocol_enrichment(summary, transcript)
+    enrichment = extract_protocol_enrichment(summary, transcript, config)
     if not config.enrichment.enabled:
         return enrichment
     catalog = load_entity_catalog(config)

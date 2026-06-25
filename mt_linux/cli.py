@@ -38,8 +38,8 @@ from mt_linux.output.transcript_patch import (
 )
 from mt_linux.paths import STATE_FILE, ensure_directories
 from mt_linux.pipeline.job import JobStatus, PipelineJob
-from mt_linux.pipeline.identity import _best_sample_segment
-from mt_linux.pipeline.job_admin import remove_job, retry_job
+from mt_linux.pipeline.identity import _best_sample_segments
+from mt_linux.pipeline.job_admin import cleanup_completed_job_audio, remove_job, retry_job
 from mt_linux.pipeline.meeting_review_queue import MeetingReviewQueue
 from mt_linux.pipeline.snapshot import JobSnapshotStore
 from mt_linux.pipeline.review_queue import ReviewQueue
@@ -334,14 +334,16 @@ def backfill_speaker_profiles(dry_run: bool) -> None:
                 continue
             if identity.label == identity.name:
                 continue
-            best_segment = _best_sample_segment(
+            best_segments = _best_sample_segments(
                 identity.label,
                 [segment for segment in (job.transcript_segments or []) if segment.speaker == identity.label],
                 job.diarization_segments,
+                max_samples=1,
             )
-            if best_segment is None:
+            if not best_segments:
                 skipped_missing_segment += 1
                 continue
+            best_segment = best_segments[0]
             updated_profiles += int(identity.name not in matcher.db)
             with TemporaryDirectory(prefix="mt-linux-backfill-") as temp_dir:
                 clip_path = Path(temp_dir) / f"{job.session_id}_{identity.label}.wav"
@@ -505,15 +507,21 @@ def review_run(session_id: str) -> None:
         if not note_updated:
             click.echo(f"Warning: transcript not found at {transcript_path}")
     for changed_session in sorted(changed_sessions):
-        if _refresh_job_summary(store, current, changed_session):
-            continue
-        fallback_entry = changed_entries[changed_session][0]
-        if _refresh_summary_for_path(
-            fallback_entry.transcript_path,
-            current,
-            fallback_entry.meeting_title or "Meeting",
-        ):
-            click.echo(f"Refreshed summary for {fallback_entry.meeting_title or changed_session}")
+        if not _refresh_job_summary(store, current, changed_session):
+            fallback_entry = changed_entries[changed_session][0]
+            if _refresh_summary_for_path(
+                fallback_entry.transcript_path,
+                current,
+                fallback_entry.meeting_title or "Meeting",
+            ):
+                click.echo(f"Refreshed summary for {fallback_entry.meeting_title or changed_session}")
+        job = store.load_one(changed_session)
+        if job is not None:
+            cleanup_completed_job_audio(
+                job,
+                keep_audio=current.output.keep_audio,
+                review_queue=queue,
+            )
 
 
 def _resolve_review_transcript_path(entry: ReviewEntry, store: JobSnapshotStore, config: AppConfig) -> Path:

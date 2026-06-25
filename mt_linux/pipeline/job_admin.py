@@ -27,10 +27,7 @@ def remove_job(
     _remove_review_entries(session_id, review_queue, deleted_paths)
     _remove_meeting_review_entries(session_id, meeting_review_queue)
     if delete_audio:
-        for path in _job_audio_paths(job):
-            if path.exists():
-                path.unlink()
-                deleted_paths.append(path)
+        deleted_paths.extend(delete_job_audio_files(job, include_imported=True))
     store.remove(session_id)
     return True, deleted_paths
 
@@ -78,9 +75,33 @@ def _remove_meeting_review_entries(session_id: str, queue: MeetingReviewQueue) -
     queue.save(remaining)
 
 
-def _job_audio_paths(job: PipelineJob) -> list[Path]:
+def cleanup_completed_job_audio(
+    job: PipelineJob,
+    *,
+    keep_audio: bool,
+    review_queue: ReviewQueue | None = None,
+) -> list[Path]:
+    if keep_audio or job.status != JobStatus.COMPLETE or job.imported_audio_path is not None:
+        return []
+    if any(identity.review_queued for identity in (job.identities or [])):
+        return []
+    if review_queue is not None and any(entry.session_id == job.session_id for entry in review_queue.load()):
+        return []
+    return delete_job_audio_files(job, include_imported=False)
+
+
+def delete_job_audio_files(job: PipelineJob, *, include_imported: bool) -> list[Path]:
+    deleted_paths: list[Path] = []
+    for path in _job_audio_paths(job, include_imported=include_imported):
+        if path.exists():
+            path.unlink()
+            deleted_paths.append(path)
+    return deleted_paths
+
+
+def _job_audio_paths(job: PipelineJob, *, include_imported: bool) -> list[Path]:
     paths = [job.app_audio_path, job.mic_audio_path]
-    if job.imported_audio_path is not None:
+    if include_imported and job.imported_audio_path is not None:
         paths.append(job.imported_audio_path)
     mixed = job.app_audio_path.with_name(f"{job.session_id}_mix.wav")
     if mixed not in paths:

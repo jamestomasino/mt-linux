@@ -18,6 +18,7 @@ from mt_linux.output.transcript_patch import (
 from mt_linux.pipeline.review_queue import ReviewQueue
 from mt_linux.pipeline.snapshot import JobSnapshotStore
 from mt_linux.pipeline.job import JobStatus, PipelineJob
+from tests.helpers import write_test_wav
 
 
 def test_replace_speaker_label_updates_transcript_and_frontmatter(tmp_path: Path):
@@ -516,6 +517,90 @@ Old summary
     assert updated.identities[0].name == "Alice Smith"
     assert updated.identities[0].confidence == "voice_profile"
     assert updated.identities[0].review_queued is False
+
+
+def test_review_run_deletes_recorded_audio_after_last_speaker_is_resolved(tmp_path: Path, monkeypatch):
+    transcript = tmp_path / "2026-06-09_14-30_meeting.md"
+    transcript.write_text(
+        """---
+title: "Meeting"
+participants:
+  - "[[SPEAKER_01]]"
+participants_identified:
+  - name: "SPEAKER_01"
+    confidence: "unidentified"
+    review_queued: true
+---
+
+## Summary
+
+Old summary
+
+---
+
+## Transcript
+
+**14:30:00** SPEAKER_01: Hello there
+""",
+        encoding="utf-8",
+    )
+    app_audio = write_test_wav(tmp_path / "audio" / "session-1_app.wav", seconds=1)
+    mic_audio = write_test_wav(tmp_path / "audio" / "session-1_mic.wav", seconds=1)
+    mixed_audio = tmp_path / "audio" / "session-1_mix.wav"
+    write_test_wav(mixed_audio, seconds=1)
+    sample = tmp_path / "sample.wav"
+    sample.write_bytes(b"wav")
+    store = JobSnapshotStore(tmp_path / "jobs")
+    job = PipelineJob(
+        session_id="session-1",
+        app_audio_path=app_audio,
+        mic_audio_path=mic_audio,
+        meeting_info=MeetingInfo(
+            app="zoom",
+            pid=1,
+            detection_method="pipewire",
+            start_time=datetime(2026, 6, 9, 14, 30),
+            title="Meeting",
+        ),
+        identities=[
+            SpeakerIdentity(
+                label="SPEAKER_01",
+                name="SPEAKER_01",
+                confidence="unidentified",
+                review_queued=True,
+            )
+        ],
+        status=JobStatus.COMPLETE,
+        summary="Old summary",
+    )
+    store.save(job)
+    queue = ReviewQueue(tmp_path / "review_queue.json")
+    queue.add(
+        ReviewEntry(
+            session_id="session-1",
+            speaker_label="SPEAKER_01",
+            sample_path=sample,
+            calendar_attendees=[],
+            meeting_title="Meeting",
+            meeting_date=datetime(2026, 6, 9).date(),
+            transcript_path=transcript,
+        )
+    )
+    cfg = AppConfig()
+    cfg.output.folder = str(tmp_path)
+    cfg.output.keep_audio = False
+    monkeypatch.setattr("mt_linux.cli.ReviewQueue", lambda: queue)
+    monkeypatch.setattr("mt_linux.cli.JobSnapshotStore", lambda: store)
+    monkeypatch.setattr("mt_linux.cli.AppConfig.load", lambda: cfg)
+    monkeypatch.setattr("mt_linux.cli._play_sample", lambda _path: None)
+    monkeypatch.setattr("mt_linux.cli._refresh_job_summary", lambda *_args, **_kwargs: True)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["review", "run"], input="Alice Smith\n", env={})
+    assert result.exit_code == 0
+    assert "Identified as Alice Smith" in result.output
+    assert not app_audio.exists()
+    assert not mic_audio.exists()
+    assert not mixed_audio.exists()
 
 
 def test_review_run_updates_speaker_profile_from_confirmed_review(tmp_path: Path, monkeypatch):

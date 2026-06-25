@@ -5,14 +5,22 @@ from pathlib import Path
 from mt_linux.config import ProtocolConfig
 from mt_linux.models import MeetingInfo
 from mt_linux.protocol.generator import ProtocolGenerator
+from mt_linux.protocol.ollama_service import ensure_ollama_ready
 from mt_linux.protocol.prompts import DEFAULT_PROMPT
 
 
 class OllamaProtocolGenerator(ProtocolGenerator):
     def __init__(self, config: ProtocolConfig):
         self.config = config
+        self._ready = False
+
+    def _ensure_ready(self) -> None:
+        if not self._ready:
+            ensure_ollama_ready(self.config)
+            self._ready = True
 
     def generate(self, transcript: str, meeting_info: MeetingInfo) -> str:
+        self._ensure_ready()
         try:
             import httpx
         except ImportError as exc:

@@ -42,10 +42,12 @@ class CalendarConfig:
 @dataclass
 class TranscriptionConfig:
     engine: str = "faster-whisper"
-    model: str = "large-v3-turbo"
+    model: str = "large-v3"
     device: str = "auto"
-    compute_type: str = "int8"
+    compute_type: str = "float16"
     language: str = ""
+    beam_size: int = 5
+    chunking_strategy: str = "vad"
 
 
 @dataclass
@@ -58,8 +60,9 @@ class DiarizationConfig:
 @dataclass
 class SpeakersConfig:
     db_path: str = str(SPEAKERS_DB_FILE)
-    similarity_threshold: float = 0.82
+    similarity_threshold: float = 0.75
     mic_speaker_name: str = ""
+    max_samples_per_speaker: int = 3
 
 
 @dataclass
@@ -92,7 +95,7 @@ class OutputConfig:
     folder: str = str(Path.home() / "Documents/meetings")
     vault_root: str = ""
     tag_style: str = "flat"
-    keep_audio: bool = True
+    keep_audio: bool = False
     audio_subfolder: str = "audio"
 
 
