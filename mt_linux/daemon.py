@@ -4,6 +4,14 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 import json
 import logging
+import os
+
+# Ensure CUDA 12 compatibility libs are findable when system has CUDA 13
+_CUDA_LIB_FIX = os.path.expanduser("~/.local/cuda-libs")
+if os.path.isdir(_CUDA_LIB_FIX):
+    _ld = os.environ.get("LD_LIBRARY_PATH", "")
+    if _CUDA_LIB_FIX not in _ld:
+        os.environ["LD_LIBRARY_PATH"] = f"{_CUDA_LIB_FIX}{':' if _ld else ''}{_ld}"
 
 from mt_linux.audio.factory import create_session_recorder
 from mt_linux.audio.wav import mix_wav_files, wav_duration_minutes, wav_files_identical
@@ -133,8 +141,13 @@ class MeetingPipeline:
             return []
         try:
             engine = FasterWhisperEngine(self.config.transcription)
-        except RuntimeError:
-            return []
+        except RuntimeError as exc:
+            logging.error(
+                "Transcription engine init failed for %s: %s",
+                job.session_id,
+                exc,
+            )
+            raise RuntimeError(f"Transcription engine unavailable for {job.session_id}: {exc}") from exc
         language = self.config.transcription.language or None
         if job.imported_audio_path is not None or wav_files_identical(job.app_audio_path, job.mic_audio_path):
             audio_path = self._processing_audio_path(job)
@@ -172,7 +185,12 @@ class MeetingPipeline:
                 self.config.diarization.hf_token,
                 num_speakers=num_speakers,
             )
-        except RuntimeError:
+        except RuntimeError as exc:
+            logging.error(
+                "Diarization engine init failed for %s: %s",
+                job.session_id,
+                exc,
+            )
             return []
         return diarizer.diarize(audio_path)
 
