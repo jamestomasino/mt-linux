@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from mt_linux.config import AppConfig
@@ -77,7 +78,6 @@ def _get_entities_root(config: AppConfig) -> Path | None:
 
 def _safe_filename(name: str) -> str:
     """Convert entity name to a safe filename."""
-    import re
     # Remove non-alphanumeric chars except spaces and hyphens
     cleaned = re.sub(r"[^a-zA-Z0-9\s\-]", "", name)
     # Collapse whitespace
@@ -132,19 +132,24 @@ discovery_confidence: {entity.confidence:.2f}
 
 
 def _update_entity_note(path: Path, entity: DiscoveredEntity) -> None:
-    """Update an existing entity note with new context if not already present."""
+    """Replace the Context section of an existing entity note.
+
+    Overwrites rather than appends so that repeated enrich-notes runs
+    are idempotent — the same transcript always produces the same
+    context block.  Cross-meeting history is preserved via the
+    separate ## Meetings section.
+    """
     content = path.read_text(encoding="utf-8")
-    if entity.context and entity.context not in content:
-        # Append new context
-        if "## Context" in content:
-            content = content.replace(
-                "## Context\n\n",
-                f"## Context\n\n{entity.context}\n",
-                1,
-            )
-        else:
-            content += f"\n## Context\n\n{entity.context}\n"
-        path.write_text(content, encoding="utf-8")
+
+    if "## Context" in content:
+        # Replace everything between ## Context and the next section header (or EOF)
+        pattern = r"(## Context\n\n)(.*?)(\n\n## |\Z)"
+        new_context = f"{entity.context}\n"
+        content = re.sub(pattern, rf"\1{new_context}\3", content, count=1, flags=re.DOTALL)
+    else:
+        content += f"\n## Context\n\n{entity.context}\n"
+
+    path.write_text(content, encoding="utf-8")
 
 
 def add_meeting_reference(entity_path: Path, meeting_title: str, meeting_date: str) -> bool:

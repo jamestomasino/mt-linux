@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import re
 
 from mt_linux.config import AppConfig
@@ -8,6 +9,9 @@ from mt_linux.enrichment.entities import EntityCatalog, linkify_entity_mentions
 from mt_linux.enrichment.models import NoteEnrichment
 from mt_linux.enrichment.service import load_entity_catalog
 from mt_linux.output.note_content import parse_note_content
+
+
+_BACKUP_SUFFIX = ".bak"
 
 
 def apply_note_enrichment(path: Path, enrichment: NoteEnrichment, config: AppConfig | None = None) -> None:
@@ -115,7 +119,21 @@ def apply_note_enrichment(path: Path, enrichment: NoteEnrichment, config: AppCon
             "",
         ]
     )
-    path.write_text(frontmatter + body, encoding="utf-8")
+    new_content = frontmatter + body
+
+    # Only write if content actually changed (idempotency guard)
+    if new_content == content:
+        return
+
+    # Backup original before overwriting
+    _backup_file(path)
+    path.write_text(new_content, encoding="utf-8")
+
+
+def _backup_file(path: Path) -> None:
+    """Create a .bak backup of the file before overwriting."""
+    backup = path.with_suffix(path.suffix + _BACKUP_SUFFIX)
+    shutil.copy2(path, backup)
 
 
 def _update_frontmatter(frontmatter: str, enrichment: NoteEnrichment) -> str:

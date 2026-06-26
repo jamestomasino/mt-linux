@@ -202,7 +202,8 @@ Original context.
     assert len(created) == 1
 
     content = existing_note.read_text(encoding="utf-8")
-    assert "Original context" in content
+    # New behavior: Context section is replaced (idempotent), not appended
+    assert "Original context" not in content
     assert "New context about Jane from a different meeting" in content
 
 
