@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 
 from mt_linux.pipeline.job import PipelineJob, JobStatus
@@ -9,6 +10,7 @@ from mt_linux.pipeline.snapshot import JobSnapshotStore
 
 PipelineProcessor = Callable[[PipelineJob], Awaitable[None]]
 FailureCallback = Callable[[PipelineJob, Exception], None]
+ReadyCheck = Callable[[], bool]
 
 
 class PipelineQueue:
@@ -43,8 +45,24 @@ class PipelineQueue:
         self,
         processor: PipelineProcessor,
         on_failure: FailureCallback | None = None,
+        *,
+        ready_check: ReadyCheck | None = None,
+        ready_poll_interval: float = 30.0,
     ) -> None:
+        last_defer_log: float = 0.0
         while True:
+            # Check GPU readiness BEFORE pulling a job so we don't start
+            # processing when the GPU is consumed by another process.
+            if ready_check is not None and not ready_check():
+                # Yield to the event loop so other tasks can make progress,
+                # then immediately retry.  Log at most once per poll interval.
+                now = asyncio.get_event_loop().time()
+                if now - last_defer_log >= ready_poll_interval:
+                    logging.info("GPU busy – deferring queue processing")
+                    last_defer_log = now
+                await asyncio.sleep(0.2)
+                continue
+
             job = await self._queue.get()
             self._discard_queued_session_id(job.session_id)
             self._active_job = job

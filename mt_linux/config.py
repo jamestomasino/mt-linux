@@ -100,6 +100,17 @@ class OutputConfig:
 
 
 @dataclass
+class PipelineConfig:
+    """Controls how the processing pipeline behaves under resource pressure."""
+    defer_on_gpu_busy: bool = True
+    """Defer processing when GPU memory is consumed by another process."""
+    gpu_min_free_mb: int = 4096
+    """Minimum free GPU memory (MB) required before processing a job."""
+    gpu_poll_interval_seconds: int = 30
+    """How often to re-check GPU availability when deferring."""
+
+
+@dataclass
 class AppConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
@@ -111,6 +122,7 @@ class AppConfig:
     openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     enrichment: EnrichmentConfig = field(default_factory=EnrichmentConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    pipeline: PipelineConfig = field(default_factory=PipelineConfig)
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> "AppConfig":

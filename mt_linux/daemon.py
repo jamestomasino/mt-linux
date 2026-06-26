@@ -50,6 +50,7 @@ from mt_linux.protocol.quality import has_substantive_transcript
 from mt_linux.runtime.meeting_sessions import MeetingSessionManager
 from mt_linux.transcription.cleanup import suppress_low_signal_segments
 from mt_linux.transcription.faster_whisper import FasterWhisperEngine
+from mt_linux.transcription.runtime import gpu_ready
 
 
 class MeetingPipeline:
@@ -504,7 +505,21 @@ async def run_daemon() -> None:
     state = DaemonState(queue, session_manager)
     coordinator = MeetingLifecycleCoordinator(session_manager, state)
     await queue.restore()
-    worker = asyncio.create_task(queue.run_worker(pipeline.process, on_failure=handle_job_failure))
+
+    # Build GPU-ready check when deferral is enabled
+    ready_check = None
+    if config.pipeline.defer_on_gpu_busy:
+        min_free = config.pipeline.gpu_min_free_mb
+        ready_check = lambda: gpu_ready(min_free_mb=min_free)
+
+    worker = asyncio.create_task(
+        queue.run_worker(
+            pipeline.process,
+            on_failure=handle_job_failure,
+            ready_check=ready_check,
+            ready_poll_interval=config.pipeline.gpu_poll_interval_seconds,
+        )
+    )
     loop = asyncio.get_running_loop()
     detector = MeetingDetector(
         on_meeting_start=lambda info: asyncio.run_coroutine_threadsafe(
