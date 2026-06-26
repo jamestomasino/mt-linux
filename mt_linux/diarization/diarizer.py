@@ -15,18 +15,32 @@ class DiarizationSegment:
 
 class PyannoteDiarizer:
     def __init__(self, hf_token: str, num_speakers: int | None = None):
+        import warnings
+
         try:
             import torch
-            from pyannote.audio import Pipeline as DiarizationPipeline
         except ImportError as exc:
             raise RuntimeError(
                 "pyannote.audio is not installed. Install the diarization extras to enable diarization."
             ) from exc
-        self.pipeline = DiarizationPipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            token=hf_token,
-        )
-        self.pipeline.to(preferred_torch_device())
+
+        # pyannote disables TF32 for reproducibility; re-enable for speed.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+        # Suppress pyannote internal warnings (TF32, pooling std correction).
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="TensorFloat-32")
+            warnings.filterwarnings(
+                "ignore", message=r"std\(\): degrees of freedom"
+            )
+            from pyannote.audio import Pipeline as DiarizationPipeline
+
+            self.pipeline = DiarizationPipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                token=hf_token,
+            )
+            self.pipeline.to(preferred_torch_device())
         self.num_speakers = num_speakers
 
     def diarize(self, audio_path: Path) -> list[DiarizationSegment]:

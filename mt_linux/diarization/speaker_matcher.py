@@ -15,7 +15,11 @@ _ENCODER = None
 def _get_encoder():
     global _ENCODER
     if _ENCODER is None:
-        from resemblyzer import VoiceEncoder
+        import warnings
+        # resemblyzer depends on webrtcvad which uses deprecated pkg_resources.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
+            from resemblyzer import VoiceEncoder
         _ENCODER = VoiceEncoder(device=resolve_device("auto"))
     return _ENCODER
 
@@ -30,7 +34,21 @@ class SpeakerMatcher:
         best_name = None
         best_similarity = 0.0
         for name, profile in self.db.items():
-            centroid = np.array(profile["centroid"], dtype=float)
+            centroid_data = profile.get("centroid")
+            if centroid_data is None:
+                # Profile has no valid centroid yet — try to rebuild from stored
+                # embeddings, or skip if there are none.
+                embeddings = profile.get("embeddings", [])
+                if embeddings:
+                    centroid = np.mean(np.array(embeddings, dtype=float), axis=0)
+                    norm = np.linalg.norm(centroid)
+                    if norm:
+                        centroid = centroid / norm
+                    profile["centroid"] = centroid.tolist()
+                else:
+                    continue
+            else:
+                centroid = np.array(centroid_data, dtype=float)
             similarity = float(np.dot(embedding, centroid))
             if similarity > best_similarity:
                 best_name = name
@@ -51,14 +69,18 @@ class SpeakerMatcher:
 
     def embed_wav(self, wav_path: Path) -> np.ndarray:
         try:
-            from resemblyzer import preprocess_wav
+            import warnings
+            # resemblyzer depends on webrtcvad which uses deprecated pkg_resources.
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
+                from resemblyzer import preprocess_wav
+            encoder = _get_encoder()
+            wav = preprocess_wav(str(wav_path))
+            embedding = encoder.embed_utterance(wav)
         except ImportError as exc:
             raise RuntimeError(
                 "resemblyzer is not installed. Install the diarization extras to enable speaker enrollment."
             ) from exc
-        encoder = _get_encoder()
-        wav = preprocess_wav(str(wav_path))
-        embedding = encoder.embed_utterance(wav)
         norm = np.linalg.norm(embedding)
         return embedding / norm if norm else embedding
 
