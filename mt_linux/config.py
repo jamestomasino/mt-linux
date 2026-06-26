@@ -69,7 +69,7 @@ class SpeakersConfig:
 class ProtocolConfig:
     enabled: bool = False
     endpoint: str = "http://localhost:11434/v1/chat/completions"
-    model: str = "llama3.1"
+    model: str = "gemma2:27b"
     prompt_path: str = ""
     language: str = "en"
     use_gpu: bool = True
