@@ -143,4 +143,4 @@ aliases = ["paratek"]
     assert "Short summary about [[Paratek / TYMLOS]]" in rendered.content
     assert "- Discussion of [[Abbott]] permissions" in rendered.content
     assert "## Open Questions" in rendered.content
-    assert "- Can Mike review the current access rules?" in rendered.content
+    assert "Can Mike review the current access rules?" in rendered.content

@@ -43,6 +43,7 @@ def render_meeting_markdown(
     output_path = output_path_for(job, config)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     catalog = load_entity_catalog(config) if config.enrichment.enabled else EntityCatalog()
+    enrichment = enrichment or NoteEnrichment()
     frontmatter = _frontmatter(
         job,
         config,
@@ -52,19 +53,31 @@ def render_meeting_markdown(
     )
     participants_table = _participants_table(identities)
     transcript_body = _transcript_body(job, transcript_segments, identities)
-    summary = summary or "No protocol generated - transcript only."
-    summary = linkify_entity_mentions(summary, catalog)
-    key_points = _bullet_section(enrichment.key_points if enrichment else [], catalog)
-    decisions = _bullet_section(enrichment.decisions if enrichment else [], catalog)
+    summary_text = summary or "No protocol generated - transcript only."
+    summary_text = linkify_entity_mentions(summary_text, catalog)
+
+    # Build sections
+    key_points = _bullet_section(enrichment.key_points, catalog)
+    decisions = _bullet_section(enrichment.decisions, catalog)
     action_items = _action_items_section(enrichment, catalog)
-    open_questions = _bullet_section(enrichment.open_questions if enrichment else [], catalog)
-    links_mentioned = _bullet_section(enrichment.links_mentioned if enrichment else [])
+    open_questions = _open_questions_section(enrichment.open_questions)
+    links_mentioned = _bullet_section(enrichment.links_mentioned)
+    topics_section = _topics_section(enrichment, catalog)
+    people_section = _key_people_section(enrichment, catalog)
+    deadlines_section = _deadlines_section(enrichment)
+    documents_section = _documents_section(enrichment, catalog)
+    quality_section = _quality_section(enrichment)
+    spell_section = _spell_corrections_section(enrichment)
+    daily_note_link = _daily_note_link(job.meeting_info.start_time)
+    related_meetings_section = _related_meetings_section(enrichment)
+
     content = "\n".join(
         [
             frontmatter,
+            daily_note_link,
             "## Summary",
             "",
-            summary.strip(),
+            summary_text.strip(),
             "",
             "---",
             "",
@@ -104,6 +117,48 @@ def render_meeting_markdown(
             "",
             "---",
             "",
+            "## Topics",
+            "",
+            topics_section,
+            "",
+            "---",
+            "",
+            "## Key People Mentioned",
+            "",
+            people_section,
+            "",
+            "---",
+            "",
+            "## Deadlines",
+            "",
+            deadlines_section,
+            "",
+            "---",
+            "",
+            "## Documents Mentioned",
+            "",
+            documents_section,
+            "",
+            "---",
+            "",
+            "## Related Meetings",
+            "",
+            related_meetings_section,
+            "",
+            "---",
+            "",
+            "## Meeting Quality",
+            "",
+            quality_section,
+            "",
+            "---",
+            "",
+            "## Spell Corrections",
+            "",
+            spell_section,
+            "",
+            "---",
+            "",
             "## Transcript",
             "",
             transcript_body,
@@ -111,6 +166,11 @@ def render_meeting_markdown(
         ]
     )
     return RenderedMeeting(path=output_path, content=content)
+
+
+# ---------------------------------------------------------------------------
+# Frontmatter
+# ---------------------------------------------------------------------------
 
 
 def _frontmatter(
@@ -135,6 +195,7 @@ def _frontmatter(
         duration_minutes = int((event.end_time - event.start_time).total_seconds() // 60)
     enrichment = enrichment or NoteEnrichment()
     tags = sorted({"meeting", "transcript", *enrichment.tags})
+
     lines = [
         "---",
         f'session_id: "{job.session_id}"',
@@ -155,6 +216,7 @@ def _frontmatter(
         *candidate_event_ids,
         "tags:",
         *[f'  - "{tag}"' for tag in tags],
+        f"sentiment: {enrichment.sentiment}",
         "status: complete",
         f'transcription_engine: "{config.transcription.engine}/{config.transcription.model}"',
         f'diarization: "{config.diarization.backend if config.diarization.enabled else "disabled"}"',
@@ -171,14 +233,36 @@ def _frontmatter(
             lines.append(f"    similarity: {identity.similarity}")
         if identity.review_queued:
             lines.append("    review_queued: true")
+
+    # Related entities
     lines.append("related_projects:")
     lines.extend([f'  - "{value}"' for value in enrichment.related_projects] or ['  - ""'])
     lines.append("related_brands:")
     lines.extend([f'  - "{value}"' for value in enrichment.related_brands] or ['  - ""'])
     lines.append("related_clients:")
     lines.extend([f'  - "{value}"' for value in enrichment.related_clients] or ['  - ""'])
+
+    # New: key people
+    lines.append("key_people:")
+    lines.extend([f'  - "{value}"' for value in enrichment.key_people] or ['  - ""'])
+
+    # New: deadlines
+    lines.append("deadlines_mentioned:")
+    lines.extend([f'  - "{value}"' for value in enrichment.deadlines_mentioned] or ['  - ""'])
+
+    # New: documents
+    lines.append("documents_mentioned:")
+    lines.extend([f'  - "{value}"' for value in enrichment.documents_mentioned] or ['  - ""'])
+
+    # New: topics
+    lines.append("meeting_topics:")
+    lines.extend([f'  - "{value}"' for value in [t.name for t in enrichment.meeting_topics]] or ['  - ""'])
+
+    # Links
     lines.append("links_mentioned:")
     lines.extend([f'  - "{value}"' for value in enrichment.links_mentioned] or ['  - ""'])
+
+    # Action items
     lines.append("action_items_structured:")
     if enrichment.action_items:
         for item in enrichment.action_items:
@@ -191,8 +275,35 @@ def _frontmatter(
         lines.append('    text: ""')
         lines.append('    status: ""')
         lines.append('    due: ""')
+
+    # Spell corrections
+    lines.append("spell_corrections:")
+    if enrichment.spell_corrections:
+        for sc in enrichment.spell_corrections:
+            lines.append(f'  - original: "{sc.original}"')
+            lines.append(f'    corrected: "{sc.corrected}"')
+            lines.append(f'    confidence: {sc.confidence}')
+    else:
+        lines.append('  - original: ""')
+        lines.append('    corrected: ""')
+        lines.append('    confidence: 0')
+
+    # Meeting quality
+    if enrichment.meeting_quality:
+        mq = enrichment.meeting_quality
+        lines.append(f"meeting_quality_score: {mq.overall_score}")
+        lines.append(f"meeting_quality_audio: {mq.audio_quality}")
+        lines.append(f"meeting_quality_speaker_coverage: {mq.speaker_coverage}")
+        lines.append("meeting_quality_gaps:")
+        lines.extend([f'  - "{g}"' for g in mq.gaps] or ['  - ""'])
+        lines.append("meeting_quality_recommendations:")
+        lines.extend([f'  - "{r}"' for r in mq.recommendations] or ['  - ""'])
+
+    # Calendar attendees
     lines.append("calendar_attendees:")
     lines.extend(attendees or ['  - ""'])
+
+    # Calendar candidates
     lines.append("calendar_candidates:")
     if info.calendar_candidates:
         for candidate in info.calendar_candidates:
@@ -202,8 +313,14 @@ def _frontmatter(
             lines.append(f'    response_status: "{candidate.response_status}"')
     else:
         lines.append('  - id: ""')
+
     lines.append("---")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Sections
+# ---------------------------------------------------------------------------
 
 
 def _participants_table(identities: list[SpeakerIdentity]) -> str:
@@ -278,29 +395,126 @@ def _compute_transcription_confidence(
     if not confidences:
         return 0.0
     avg = sum(confidences) / len(confidences)
-    # Sigmoid-ish mapping: -2.0 -> ~12%, -1.0 -> ~27%, -0.5 -> ~38%, 0 -> 50%
-    # But Whisper logprobs are typically -0.3 to -2.0 for decent transcripts.
-    # Clamp and scale to a more useful 0-100 range.
     clamped = max(-3.0, min(0.0, avg))
     return round((clamped + 3.0) / 3.0 * 100, 1)
 
 
-def _relative_audio_paths(paths: list[Path], config: AppConfig) -> list[str]:
-    vault_root = config.resolve_path(config.output.vault_root) if config.output.vault_root else None
-    result: list[str] = []
-    for path in paths:
-        if vault_root:
-            try:
-                result.append(str(path.resolve().relative_to(vault_root.resolve())))
-                continue
-            except Exception:
-                pass
-        result.append(str(path))
-    return result
+def _topics_section(enrichment: NoteEnrichment, catalog: EntityCatalog) -> str:
+    if not enrichment.meeting_topics:
+        return ""
+    lines: list[str] = []
+    for topic in enrichment.meeting_topics:
+        name = linkify_entity_mentions(topic.name, catalog)
+        weight_emoji = "🔥" if topic.weight >= 0.8 else "📌" if topic.weight >= 0.5 else "📝"
+        lines.append(f"- {weight_emoji} {name}")
+        if topic.related_entities:
+            for entity in topic.related_entities:
+                lines.append(f"  - [[{entity}]]")
+    return "\n".join(lines)
 
 
-def _wikify(name: str) -> str:
-    return f"[[{name}]]" if name and not name.startswith("[[") else name
+def _key_people_section(enrichment: NoteEnrichment, catalog: EntityCatalog) -> str:
+    if not enrichment.key_people:
+        return ""
+    lines: list[str] = []
+    for person in enrichment.key_people:
+        lines.append(f"- [[{person}]]")
+    return "\n".join(lines)
+
+
+def _deadlines_section(enrichment: NoteEnrichment) -> str:
+    if not enrichment.deadlines_mentioned:
+        return ""
+    lines: list[str] = []
+    for deadline in enrichment.deadlines_mentioned:
+        lines.append(f"- ⏰ {deadline}")
+    return "\n".join(lines)
+
+
+def _documents_section(enrichment: NoteEnrichment, catalog: EntityCatalog) -> str:
+    if not enrichment.documents_mentioned:
+        return ""
+    lines: list[str] = []
+    for doc in enrichment.documents_mentioned:
+        linked = linkify_entity_mentions(doc, catalog)
+        lines.append(f"- 📄 {linked}")
+    return "\n".join(lines)
+
+
+def _open_questions_section(questions: list[str]) -> str:
+    if not questions:
+        return ""
+    lines: list[str] = []
+    for q in questions:
+        lines.append(f"- ❓ {q}")
+    return "\n".join(lines)
+
+
+def _related_meetings_section(enrichment: NoteEnrichment) -> str:
+    if not enrichment.related_meetings:
+        return ""
+    lines: list[str] = []
+    for meeting in enrichment.related_meetings:
+        lines.append(f"- [[{meeting}]]")
+    return "\n".join(lines)
+
+
+def _quality_section(enrichment: NoteEnrichment) -> str:
+    if not enrichment.meeting_quality:
+        return ""
+    mq = enrichment.meeting_quality
+    lines: list[str] = []
+
+    # Obsidian callout for quality
+    score = mq.overall_score
+    if score >= 0.8:
+        callout_type = "info"
+        callout_title = "✅ Good Quality"
+    elif score >= 0.5:
+        callout_type = "warning"
+        callout_title = "⚠️ Moderate Quality"
+    else:
+        callout_type = "bug"
+        callout_title = "❌ Low Quality"
+
+    lines.append(f"> [!{callout_type}] {callout_title} (score: {score:.0%})")
+    lines.append(f"> Audio quality: {mq.audio_quality} | Speaker coverage: {mq.speaker_coverage:.0%}")
+
+    if mq.gaps:
+        lines.append(">")
+        lines.append("> **Gaps detected:**")
+        for gap in mq.gaps:
+            lines.append(f"> - {gap}")
+
+    if mq.recommendations:
+        lines.append(">")
+        lines.append("> **Recommendations:**")
+        for rec in mq.recommendations:
+            lines.append(f"> - {rec}")
+
+    return "\n".join(lines)
+
+
+def _spell_corrections_section(enrichment: NoteEnrichment) -> str:
+    if not enrichment.spell_corrections:
+        return ""
+    lines: list[str] = []
+    lines.append("> [!abstract] Spell Corrections Detected")
+    for sc in enrichment.spell_corrections:
+        if sc.confidence >= 0.5:
+            lines.append(f"> - `{sc.original}` → **{sc.corrected}** ({sc.entity_type}, confidence: {sc.confidence:.0%})")
+    return "\n".join(lines)
+
+
+def _daily_note_link(start_time) -> str:
+    """Create a link to the Obsidian daily note for this date."""
+    date_str = start_time.strftime("%Y-%m-%d")
+    return f"\n[[{date_str}]]\n"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _bullet_section(items: list[str], catalog: EntityCatalog | None = None) -> str:
@@ -318,7 +532,29 @@ def _action_items_section(enrichment: NoteEnrichment | None, catalog: EntityCata
     for item in enrichment.action_items:
         text = linkify_entity_mentions(item.text, catalog)
         if item.owner:
-            lines.append(f"- {item.owner}: {text}")
+            lines.append(f"- ✅ **{item.owner}**: {text}")
         else:
-            lines.append(f"- {text}")
+            lines.append(f"- ✅ {text}")
+        if item.due:
+            lines.append(f"  - Due: {item.due}")
+        if item.status:
+            lines.append(f"  - Status: {item.status}")
     return "\n".join(lines)
+
+
+def _wikify(name: str) -> str:
+    return f"[[{name}]]" if name and not name.startswith("[[") else name
+
+
+def _relative_audio_paths(paths: list[Path], config: AppConfig) -> list[str]:
+    vault_root = config.resolve_path(config.output.vault_root) if config.output.vault_root else None
+    result: list[str] = []
+    for path in paths:
+        if vault_root:
+            try:
+                result.append(str(path.resolve().relative_to(vault_root.resolve())))
+                continue
+            except Exception:
+                pass
+        result.append(str(path))
+    return result

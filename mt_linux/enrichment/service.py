@@ -3,18 +3,52 @@ from __future__ import annotations
 from pathlib import Path
 
 from mt_linux.config import AppConfig
+from mt_linux.enrichment.auto_entities import create_entity_notes
+from mt_linux.enrichment.discovery import enrich_with_llm, check_spelling
 from mt_linux.enrichment.entities import EntityCatalog, apply_entity_matches
 from mt_linux.enrichment.models import NoteEnrichment
 from mt_linux.enrichment.protocol_sections import extract_protocol_enrichment
 from mt_linux.enrichment.vault_entities import default_entity_notes_root, write_entity_catalog
 
 
-def enrich_note(summary: str, transcript: str, config: AppConfig) -> NoteEnrichment:
+def enrich_note(
+    summary: str,
+    transcript: str,
+    config: AppConfig,
+    run_discovery: bool = True,
+) -> NoteEnrichment:
+    """Full enrichment pipeline for a meeting note.
+
+    Steps:
+    1. Extract protocol sections (summary, decisions, action items) via regex.
+    2. Match known entities from the catalog.
+    3. Run local spell checking against the catalog.
+    4. Optionally run LLM-powered discovery (new entities, topics, quality).
+    5. Optionally create entity notes for high-confidence discoveries.
+    """
+    # Step 1: Extract structured sections from protocol
     enrichment = extract_protocol_enrichment(summary, transcript, config)
+
     if not config.enrichment.enabled:
         return enrichment
+
+    # Step 2: Load catalog and match known entities
     catalog = load_entity_catalog(config)
-    return apply_entity_matches(enrichment, f"{summary}\n{transcript}", catalog)
+    enrichment = apply_entity_matches(enrichment, f"{summary}\n{transcript}", catalog)
+
+    # Step 3: Local spell checking (no LLM required)
+    local_corrections = check_spelling(f"{summary}\n{transcript}", catalog)
+    enrichment.spell_corrections.extend(local_corrections)
+
+    # Step 4: LLM-powered discovery
+    if run_discovery:
+        enrichment = enrich_with_llm(summary, transcript, config, catalog, enrichment)
+
+        # Step 5: Create entity notes for high-confidence discoveries
+        if enrichment.discovered_entities:
+            create_entity_notes(enrichment.discovered_entities, config)
+
+    return enrichment
 
 
 def load_entity_catalog(config: AppConfig) -> EntityCatalog:
