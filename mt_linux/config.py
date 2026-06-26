@@ -73,6 +73,8 @@ class ProtocolConfig:
     prompt_path: str = ""
     language: str = "en"
     use_gpu: bool = True
+    context_file: str = ""
+    """Optional path to a file with company/personal context for the LLM."""
 
 
 @dataclass

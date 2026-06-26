@@ -30,13 +30,19 @@ class OllamaProtocolGenerator(ProtocolGenerator):
         prompt = DEFAULT_PROMPT
         if self.config.prompt_path:
             prompt = Path(self.config.prompt_path).expanduser().read_text(encoding="utf-8")
+
+        # Inject company/personal context if configured
+        context = self._load_context()
+
         payload = {
             "model": self.config.model,
             "messages": [
                 {"role": "system", "content": prompt},
                 {
                     "role": "user",
-                    "content": f"Meeting: {meeting_info.title or meeting_info.app}\n\n{transcript}",
+                    "content": self._build_user_message(
+                        meeting_info, transcript, context
+                    ),
                 },
             ],
         }
@@ -44,3 +50,31 @@ class OllamaProtocolGenerator(ProtocolGenerator):
         response = httpx.post(self.config.endpoint, json=payload, timeout=300)
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
+
+    def _load_context(self) -> str:
+        """Load the context file if configured."""
+        ctx_path = self.config.context_file
+        if not ctx_path:
+            return ""
+        path = Path(ctx_path).expanduser()
+        if not path.exists():
+            import logging
+
+            logging.warning("Protocol context file not found: %s", path)
+            return ""
+        return path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _build_user_message(
+        meeting_info: MeetingInfo, transcript: str, context: str
+    ) -> str:
+        parts: list[str] = []
+        parts.append(f"Meeting: {meeting_info.title or meeting_info.app}")
+        if context:
+            parts.append("")
+            parts.append("## Background Context")
+            parts.append(context)
+        parts.append("")
+        parts.append("## Transcript")
+        parts.append(transcript)
+        return "\n".join(parts)
