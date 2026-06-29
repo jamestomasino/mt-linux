@@ -13,6 +13,33 @@ from mt_linux.models import SpeakerIdentity, TranscriptSegment
 from mt_linux.pipeline.job import PipelineJob
 
 
+def _deduplicate_identities(
+    identities: list[SpeakerIdentity],
+) -> list[SpeakerIdentity]:
+    """Collapse multiple diarization speakers that resolve to the same name.
+
+    When pyannote over-segments (e.g. 6 SPEAKER_* labels all matching 'Dave Brous'),
+    keep a single identity entry per resolved name, preserving the highest similarity.
+    """
+    seen: dict[str, SpeakerIdentity] = {}
+    for identity in identities:
+        key = identity.name.lower().strip()
+        if not key:
+            # Unidentified speakers — keep as-is (unique label).
+            seen[key] = identity
+            continue
+        existing = seen.get(key)
+        if existing is None:
+            seen[key] = identity
+        else:
+            # Keep the identity with the highest similarity score.
+            new_sim = identity.similarity or 0.0
+            old_sim = existing.similarity or 0.0
+            if new_sim > old_sim:
+                seen[key] = identity
+    return list(seen.values())
+
+
 @dataclass
 class RenderedMeeting:
     path: Path
@@ -44,6 +71,10 @@ def render_meeting_markdown(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     catalog = load_entity_catalog(config) if config.enrichment.enabled else EntityCatalog()
     enrichment = enrichment or NoteEnrichment()
+    # Deduplicate identities: when diarization over-segments, multiple speakers
+    # can match the same voice profile name. Keep one entry per resolved name,
+    # preserving the highest-similarity identity.
+    identities = _deduplicate_identities(identities)
     frontmatter = _frontmatter(
         job,
         config,

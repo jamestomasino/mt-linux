@@ -134,6 +134,7 @@ class MeetingPipeline:
             keep_audio=self.config.output.keep_audio,
             review_queue=self.review_queue,
         )
+        self._cleanup_gpu_resources()
 
     def _transcribe(self, job: PipelineJob) -> list[TranscriptSegment]:
         job.set_status(JobStatus.TRANSCRIBING, "Transcription started")
@@ -196,12 +197,16 @@ class MeetingPipeline:
         return diarizer.diarize(audio_path)
 
     def _estimate_num_speakers(self, job: PipelineJob) -> int | None:
-        """Estimate speaker count from calendar attendees + mic speaker."""
+        """Estimate speaker count from calendar attendees + mic speaker.
+
+        Caps the estimate to avoid over-segmentation when a calendar event
+        has many attendees who don't actually speak (e.g. distribution lists).
+        """
+        MAX_SPEAKER_ESTIMATE = 8
         event = job.meeting_info.calendar_event
         if event and event.attendees:
-            # Unique attendee names + 1 for the local mic speaker.
             unique = {a.name.strip().lower() for a in event.attendees if a.name.strip()}
-            return max(len(unique) + 1, 2)
+            return min(max(len(unique) + 1, 2), MAX_SPEAKER_ESTIMATE)
         return None
 
     def _generate_protocol(self, job: PipelineJob, segments: list[TranscriptSegment]) -> str:
@@ -329,6 +334,41 @@ class MeetingPipeline:
             source_audio_path=self._identity_audio_path(job),
             speaker_matcher=self._get_speaker_matcher(),
         )
+
+    def _cleanup_gpu_resources(self) -> None:
+        """Unload the ollama model and clear CUDA caches after a job completes.
+
+        Prevents GPU memory from being held hostage by the local LLM, which
+        would block other workloads (or the next mt-linux job).
+        """
+        if self.config.protocol.enabled:
+            self._unload_ollama_model()
+        self._clear_cuda_cache()
+
+    def _unload_ollama_model(self) -> None:
+        """Ask ollama to unload the currently loaded model from GPU memory."""
+        if not self.config.protocol.enabled:
+            return
+        try:
+            import subprocess
+            subprocess.run(
+                ["ollama", "stop", self.config.model],
+                capture_output=True, timeout=10, check=False,
+            )
+            logging.info("Unloaded ollama model '%s'", self.config.model)
+        except Exception:
+            logging.debug("Failed to unload ollama model (non-fatal)")
+
+    @staticmethod
+    def _clear_cuda_cache() -> None:
+        """Free cached GPU memory so the next job (or other processes) can use it."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
+        except Exception:
+            pass
 
     def _assign_named_speakers(self, job: PipelineJob) -> list[TranscriptSegment]:
         assigned = self._assign_transcript_speakers(job)
