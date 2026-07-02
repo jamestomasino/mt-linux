@@ -26,7 +26,7 @@ from mt_linux.diarization.speaker_matcher import SpeakerMatcher
 from mt_linux.doctor import run_doctor, summarize_results
 from mt_linux.enrichment.service import enrich_note, entity_notes_root, sync_entity_catalog
 from mt_linux.models import Attendee, CalendarEvent, MeetingInfo, MeetingReviewEntry, ReviewEntry
-from mt_linux.output.enrichment_patch import apply_note_enrichment
+from mt_linux.output.enrichment_patch import apply_note_enrichment, is_already_enriched, get_enriched_at
 from mt_linux.output.markdown import output_path_for, slugify
 from mt_linux.output.note_content import parse_note_content
 from mt_linux.output.protocol_refresh import refresh_summary_from_transcript
@@ -805,25 +805,76 @@ def export_corpus(format_name: str) -> None:
 
 @cli.command("enrich-notes")
 @click.option("--limit", default=0, show_default=True, help="Limit the number of notes to process.")
-def enrich_notes(limit: int) -> None:
+@click.option(
+    "--since",
+    default=None,
+    type=click.DateTime(formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"]),
+    help="Only process notes enriched after this date (or not enriched at all).",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Re-enrich notes even if they already have an enriched_at timestamp.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show which notes would be processed without making changes.",
+)
+def enrich_notes(limit: int, since: datetime | None, force: bool, dry_run: bool) -> None:
     """Backfill note enrichment."""
     current = AppConfig.load()
     sync_entity_catalog(current)
     output_dir = current.resolve_path(current.output.folder)
     notes = sorted(output_dir.glob("*.md"))
     processed = 0
+    skipped = 0
     for path in notes:
         parsed = parse_note_content(path.read_text(encoding="utf-8"))
         if not parsed.transcript:
             continue
-        enrichment = enrich_note(parsed.summary, parsed.transcript, current)
-        apply_note_enrichment(path, enrichment, current)
-        processed += 1
-        click.echo(f"Enriched {path.name}")
+
+        # Skip already-enriched notes unless --force or --since is set
+        if not force and since is None and is_already_enriched(path):
+            skipped += 1
+            continue
+
+        # With --since, skip notes enriched after the cutoff
+        if since is not None:
+            # Ensure timezone-aware comparison
+            since_aware = since.replace(tzinfo=UTC) if since.tzinfo is None else since
+            enriched_at_str = get_enriched_at(path)
+            if enriched_at_str:
+                try:
+                    enriched_dt = datetime.fromisoformat(enriched_at_str)
+                    if enriched_dt.tzinfo is None:
+                        enriched_dt = enriched_dt.replace(tzinfo=UTC)
+                    if enriched_dt >= since_aware:
+                        skipped += 1
+                        continue
+                except ValueError:
+                    pass  # Unparseable timestamp; process anyway
+
+        if dry_run:
+            enriched_at_str = get_enriched_at(path)
+            status = f"enriched: {enriched_at_str}" if enriched_at_str else "not enriched"
+            click.echo(f"[dry-run] Would enrich {path.name} ({status})")
+            processed += 1
+        else:
+            enrichment = enrich_note(parsed.summary, parsed.transcript, current)
+            apply_note_enrichment(path, enrichment, current)
+            processed += 1
+            click.echo(f"Enriched {path.name}")
+
         if limit and processed >= limit:
             break
+
     if processed == 0:
         click.echo("No transcript notes found.")
+    else:
+        click.echo(f"Processed: {processed}, Skipped: {skipped}")
 
 
 @cli.command("sync-entities")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 import shutil
 import re
@@ -14,11 +15,40 @@ from mt_linux.output.note_content import parse_note_content
 _BACKUP_SUFFIX = ".bak"
 
 
+def is_already_enriched(path: Path) -> bool:
+    """Check if a note file has been previously enriched.
+
+    Returns True if the frontmatter contains a non-empty enriched_at timestamp.
+    """
+    content = path.read_text(encoding="utf-8")
+    parsed = parse_note_content(content)
+    if not parsed.frontmatter:
+        return False
+    # Look for enriched_at in frontmatter lines
+    for line in parsed.frontmatter.splitlines():
+        if line.startswith("enriched_at:"):
+            value = line.split(":", 1)[1].strip().strip('"').strip("'")
+            return bool(value)
+    return False
+
+
+def get_enriched_at(path: Path) -> str | None:
+    """Return the enriched_at timestamp string from frontmatter, or None."""
+    content = path.read_text(encoding="utf-8")
+    parsed = parse_note_content(content)
+    if not parsed.frontmatter:
+        return None
+    for line in parsed.frontmatter.splitlines():
+        if line.startswith("enriched_at:"):
+            return line.split(":", 1)[1].strip().strip('"').strip("'")
+    return None
+
+
 def apply_note_enrichment(path: Path, enrichment: NoteEnrichment, config: AppConfig | None = None) -> None:
     content = path.read_text(encoding="utf-8")
     parsed = parse_note_content(content)
     catalog = load_entity_catalog(config) if config and config.enrichment.enabled else EntityCatalog()
-    frontmatter = _update_frontmatter(parsed.frontmatter, enrichment)
+    frontmatter = _update_frontmatter(parsed.frontmatter, enrichment, datetime.now(UTC).isoformat())
 
     summary_text = linkify_entity_mentions(parsed.summary, catalog)
     key_points = _bullet_section(enrichment.key_points, catalog)
@@ -136,10 +166,12 @@ def _backup_file(path: Path) -> None:
     shutil.copy2(path, backup)
 
 
-def _update_frontmatter(frontmatter: str, enrichment: NoteEnrichment) -> str:
+def _update_frontmatter(frontmatter: str, enrichment: NoteEnrichment, enriched_at: str) -> str:
     if not frontmatter:
         return ""
     updated = frontmatter
+    # Timestamp so enrich-notes can skip already-processed notes
+    updated = _replace_or_insert_scalar(updated, "enriched_at", enriched_at)
     updated = _replace_or_insert_block(updated, "related_projects", [f'  - "{item}"' for item in enrichment.related_projects] or ['  - ""'])
     updated = _replace_or_insert_block(updated, "related_brands", [f'  - "{item}"' for item in enrichment.related_brands] or ['  - ""'])
     updated = _replace_or_insert_block(updated, "related_clients", [f'  - "{item}"' for item in enrichment.related_clients] or ['  - ""'])
