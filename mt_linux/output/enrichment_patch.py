@@ -20,25 +20,21 @@ def is_already_enriched(path: Path) -> bool:
 
     Returns True if the frontmatter contains a non-empty enriched_at timestamp.
     """
-    content = path.read_text(encoding="utf-8")
-    parsed = parse_note_content(content)
-    if not parsed.frontmatter:
-        return False
-    # Look for enriched_at in frontmatter lines
-    for line in parsed.frontmatter.splitlines():
-        if line.startswith("enriched_at:"):
-            value = line.split(":", 1)[1].strip().strip('"').strip("'")
-            return bool(value)
-    return False
+    return get_enriched_at(path) is not None
 
 
 def get_enriched_at(path: Path) -> str | None:
     """Return the enriched_at timestamp string from frontmatter, or None."""
     content = path.read_text(encoding="utf-8")
     parsed = parse_note_content(content)
-    if not parsed.frontmatter:
+    return get_enriched_at_from_frontmatter(parsed.frontmatter)
+
+
+def get_enriched_at_from_frontmatter(frontmatter: str) -> str | None:
+    """Return the enriched_at timestamp string from frontmatter text, or None."""
+    if not frontmatter:
         return None
-    for line in parsed.frontmatter.splitlines():
+    for line in frontmatter.splitlines():
         if line.startswith("enriched_at:"):
             return line.split(":", 1)[1].strip().strip('"').strip("'")
     return None
@@ -171,7 +167,7 @@ def _update_frontmatter(frontmatter: str, enrichment: NoteEnrichment, enriched_a
         return ""
     updated = frontmatter
     # Timestamp so enrich-notes can skip already-processed notes
-    updated = _replace_or_insert_scalar(updated, "enriched_at", enriched_at)
+    updated = _replace_or_insert_scalar(updated, "enriched_at", f'"{enriched_at}"')
     updated = _replace_or_insert_block(updated, "related_projects", [f'  - "{item}"' for item in enrichment.related_projects] or ['  - ""'])
     updated = _replace_or_insert_block(updated, "related_brands", [f'  - "{item}"' for item in enrichment.related_brands] or ['  - ""'])
     updated = _replace_or_insert_block(updated, "related_clients", [f'  - "{item}"' for item in enrichment.related_clients] or ['  - ""'])

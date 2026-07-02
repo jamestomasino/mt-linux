@@ -26,7 +26,7 @@ from mt_linux.diarization.speaker_matcher import SpeakerMatcher
 from mt_linux.doctor import run_doctor, summarize_results
 from mt_linux.enrichment.service import enrich_note, entity_notes_root, sync_entity_catalog
 from mt_linux.models import Attendee, CalendarEvent, MeetingInfo, MeetingReviewEntry, ReviewEntry
-from mt_linux.output.enrichment_patch import apply_note_enrichment, is_already_enriched, get_enriched_at
+from mt_linux.output.enrichment_patch import apply_note_enrichment, get_enriched_at_from_frontmatter
 from mt_linux.output.markdown import output_path_for, slugify
 from mt_linux.output.note_content import parse_note_content
 from mt_linux.output.protocol_refresh import refresh_summary_from_transcript
@@ -809,7 +809,7 @@ def export_corpus(format_name: str) -> None:
     "--since",
     default=None,
     type=click.DateTime(formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"]),
-    help="Only process notes enriched after this date (or not enriched at all).",
+    help="Only process notes enriched before this date (or not enriched at all).",
 )
 @click.option(
     "--force",
@@ -836,30 +836,30 @@ def enrich_notes(limit: int, since: datetime | None, force: bool, dry_run: bool)
         if not parsed.transcript:
             continue
 
+        # Parse enriched_at once from already-read content
+        enriched_at = get_enriched_at_from_frontmatter(parsed.frontmatter)
+
         # Skip already-enriched notes unless --force or --since is set
-        if not force and since is None and is_already_enriched(path):
+        if not force and since is None and enriched_at is not None:
             skipped += 1
             continue
 
         # With --since, skip notes enriched after the cutoff
-        if since is not None:
+        if since is not None and enriched_at is not None:
             # Ensure timezone-aware comparison
             since_aware = since.replace(tzinfo=UTC) if since.tzinfo is None else since
-            enriched_at_str = get_enriched_at(path)
-            if enriched_at_str:
-                try:
-                    enriched_dt = datetime.fromisoformat(enriched_at_str)
-                    if enriched_dt.tzinfo is None:
-                        enriched_dt = enriched_dt.replace(tzinfo=UTC)
-                    if enriched_dt >= since_aware:
-                        skipped += 1
-                        continue
-                except ValueError:
-                    pass  # Unparseable timestamp; process anyway
+            try:
+                enriched_dt = datetime.fromisoformat(enriched_at)
+                if enriched_dt.tzinfo is None:
+                    enriched_dt = enriched_dt.replace(tzinfo=UTC)
+                if enriched_dt >= since_aware:
+                    skipped += 1
+                    continue
+            except ValueError:
+                pass  # Unparseable timestamp; process anyway
 
         if dry_run:
-            enriched_at_str = get_enriched_at(path)
-            status = f"enriched: {enriched_at_str}" if enriched_at_str else "not enriched"
+            status = f"enriched: {enriched_at}" if enriched_at else "not enriched"
             click.echo(f"[dry-run] Would enrich {path.name} ({status})")
             processed += 1
         else:

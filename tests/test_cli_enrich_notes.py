@@ -7,7 +7,7 @@ from click.testing import CliRunner
 
 from mt_linux.cli import cli
 from mt_linux.config import AppConfig
-from mt_linux.output.enrichment_patch import is_already_enriched, get_enriched_at
+from mt_linux.output.enrichment_patch import is_already_enriched, get_enriched_at, get_enriched_at_from_frontmatter
 
 
 _BASE_NOTE = """\
@@ -375,3 +375,130 @@ def test_enrich_notes_limit_respects_skip(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     # All skipped, no processing happened
     assert "No transcript notes found." in result.output
+
+
+def test_get_enriched_at_from_frontmatter_returns_none_for_empty():
+    assert get_enriched_at_from_frontmatter("") is None
+    assert get_enriched_at_from_frontmatter("---\n---\n") is None
+
+
+def test_get_enriched_at_from_frontmatter_parses_timestamp():
+    fm = '---\nenriched_at: "2026-07-01T10:00:00+00:00"\n---\n'
+    assert get_enriched_at_from_frontmatter(fm) == "2026-07-01T10:00:00+00:00"
+
+
+def test_get_enriched_at_from_frontmatter_handles_unquoted():
+    fm = '---\nenriched_at: 2026-07-01T10:00:00+00:00\n---\n'
+    assert get_enriched_at_from_frontmatter(fm) == "2026-07-01T10:00:00+00:00"
+
+
+def test_enrich_notes_force_and_since(tmp_path: Path, monkeypatch):
+    """--force with --since: process all notes regardless of enriched_at, but --since is ignored since --force overrides."""
+    output_dir = tmp_path / "notes"
+    output_dir.mkdir()
+
+    # All enriched after the since cutoff
+    for i in range(3):
+        p = output_dir / f"{i:03d}.md"
+        p.write_text(_ENRICHED_NOTE, encoding="utf-8")
+
+    entities = tmp_path / "entities.toml"
+    entities.write_text("", encoding="utf-8")
+
+    config = AppConfig()
+    config.output.folder = str(output_dir)
+    config.enrichment.entity_catalog_path = str(entities)
+
+    monkeypatch.setattr("mt_linux.cli.AppConfig.load", lambda: config)
+
+    call_count = 0
+
+    def fake_enrich(*a, **kw):
+        nonlocal call_count
+        call_count += 1
+        from mt_linux.enrichment.models import NoteEnrichment
+        return NoteEnrichment()
+
+    monkeypatch.setattr("mt_linux.cli.enrich_note", fake_enrich)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["enrich-notes", "--force", "--since", "2026-06-20"])
+    assert result.exit_code == 0
+    # --force overrides the skip, so all 3 should be processed
+    assert call_count == 3
+
+
+def test_enrich_notes_dry_run_with_since(tmp_path: Path, monkeypatch):
+    """--dry-run with --since should only show notes that would be processed."""
+    output_dir = tmp_path / "notes"
+    output_dir.mkdir()
+
+    # Enriched before cutoff
+    old = output_dir / "001_old.md"
+    old.write_text(
+        '---\nenriched_at: "2026-06-01T00:00:00+00:00"\n---\n'
+        "## Summary\n\nOld.\n\n---\n\n## Participants\n\nnone\n\n---\n\n## Transcript\n\n**10:00** A: hi\n",
+        encoding="utf-8",
+    )
+    # Enriched after cutoff
+    recent = output_dir / "002_recent.md"
+    recent.write_text(
+        '---\nenriched_at: "2026-06-20T00:00:00+00:00"\n---\n'
+        "## Summary\n\nRecent.\n\n---\n\n## Participants\n\nnone\n\n---\n\n## Transcript\n\n**10:00** A: hi\n",
+        encoding="utf-8",
+    )
+    # Not enriched at all
+    fresh = output_dir / "003_fresh.md"
+    fresh.write_text(
+        "---\n---\n"
+        "## Summary\n\nFresh.\n\n---\n\n## Participants\n\nnone\n\n---\n\n## Transcript\n\n**10:00** A: hi\n",
+        encoding="utf-8",
+    )
+
+    entities = tmp_path / "entities.toml"
+    entities.write_text("", encoding="utf-8")
+
+    config = AppConfig()
+    config.output.folder = str(output_dir)
+    config.enrichment.entity_catalog_path = str(entities)
+
+    monkeypatch.setattr("mt_linux.cli.AppConfig.load", lambda: config)
+    monkeypatch.setattr("mt_linux.cli.enrich_note", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("should not call")))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["enrich-notes", "--dry-run", "--since", "2026-06-10"])
+    assert result.exit_code == 0
+    assert "001_old.md" in result.output
+    assert "003_fresh.md" in result.output
+    assert "002_recent.md" not in result.output
+    assert "Skipped: 1" in result.output
+
+
+def test_enrich_notes_writes_quoted_enriched_at(tmp_path: Path, monkeypatch):
+    """Enriched notes should have enriched_at quoted in frontmatter."""
+    output_dir = tmp_path / "notes"
+    output_dir.mkdir()
+    note = output_dir / "001.md"
+    note.write_text(_BASE_NOTE, encoding="utf-8")
+
+    entities = tmp_path / "entities.toml"
+    entities.write_text("", encoding="utf-8")
+
+    config = AppConfig()
+    config.output.folder = str(output_dir)
+    config.enrichment.entity_catalog_path = str(entities)
+
+    monkeypatch.setattr("mt_linux.cli.AppConfig.load", lambda: config)
+
+    def fake_enrich(*a, **kw):
+        from mt_linux.enrichment.models import NoteEnrichment
+        return NoteEnrichment()
+
+    monkeypatch.setattr("mt_linux.cli.enrich_note", fake_enrich)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["enrich-notes"])
+    assert result.exit_code == 0
+    content = note.read_text(encoding="utf-8")
+    # enriched_at should be quoted
+    assert 'enriched_at: "' in content
