@@ -135,7 +135,11 @@ class AppConfig:
             return config
         with path.open("rb") as handle:
             data = tomllib.load(handle)
-        return _merge_dataclass(cls(), data)
+        config = _merge_dataclass(cls(), data)
+        # Fall back to HF_TOKEN env var if not set in config
+        if not config.diarization.hf_token:
+            config.diarization.hf_token = os.environ.get("HF_TOKEN", "")
+        return config
 
     def save(self, path: Path = CONFIG_FILE) -> None:
         ensure_directories()
