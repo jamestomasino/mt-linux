@@ -17,5 +17,7 @@ dist/
 .env
 .env.*
 
+/audio/
+
 .DS_Store
 .aider*
