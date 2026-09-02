@@ -423,6 +423,19 @@ Old summary
 
 
 def test_review_run_uses_current_job_transcript_path_when_queue_path_is_stale(tmp_path: Path, monkeypatch):
+    class FakePlayback:
+        stopped = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.stopped = True
+
+        def wait(self, timeout=None):
+            return 0
+
+    playback = FakePlayback()
     stale_transcript = tmp_path / "old-name.md"
     current_transcript = tmp_path / "2026-06-09_14-30_meeting.md"
     current_transcript.write_text(
@@ -488,7 +501,7 @@ Old summary
             speaker_label="SPEAKER_01",
             sample_path=sample,
             calendar_attendees=[],
-            meeting_title="Meeting",
+            meeting_title=None,
             meeting_date=datetime(2026, 6, 9).date(),
             transcript_path=stale_transcript,
         )
@@ -499,7 +512,7 @@ Old summary
     monkeypatch.setattr("mt_linux.cli.ReviewQueue", lambda: queue)
     monkeypatch.setattr("mt_linux.cli.JobSnapshotStore", lambda: store)
     monkeypatch.setattr("mt_linux.cli.AppConfig.load", lambda: cfg)
-    monkeypatch.setattr("mt_linux.cli._play_sample", lambda _path: None)
+    monkeypatch.setattr("mt_linux.cli._play_sample", lambda _path: playback)
     monkeypatch.setattr(
         "mt_linux.cli._refresh_job_summary",
         lambda _store, _config, session_id: refreshed.append(session_id) or True,
@@ -507,6 +520,8 @@ Old summary
     runner = CliRunner()
     result = runner.invoke(cli, ["review", "run"], input="Alice Smith\n", env={})
     assert result.exit_code == 0
+    assert "Meeting: Meeting (2026-06-09 14:30)" in result.output
+    assert playback.stopped is True
     assert "Identified as Alice Smith" in result.output
     assert refreshed == ["session-1"]
     content = current_transcript.read_text(encoding="utf-8")

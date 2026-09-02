@@ -14,6 +14,7 @@ from tests.helpers import write_test_wav
 
 def test_review_meetings_can_mark_session_as_external(tmp_path: Path, monkeypatch):
     transcript = tmp_path / "2026-06-07_14-30_weekly-standup.md"
+    stale_transcript = tmp_path / "2026-06-07_14-30_zoom.md"
     transcript.write_text(
         """---
 title: "Weekly Standup"
@@ -37,7 +38,7 @@ calendar_candidates:
     queue.add(
         MeetingReviewEntry(
             session_id="session-1",
-            transcript_path=transcript,
+            transcript_path=stale_transcript,
             selected_event_id="event-1",
             candidates=[
                 CalendarEvent(

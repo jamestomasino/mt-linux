@@ -472,10 +472,19 @@ def review_run(session_id: str) -> None:
     changed_entries: dict[str, list[ReviewEntry]] = {}
     for entry in entries:
         transcript_path = _resolve_review_transcript_path(entry, store, current)
-        click.echo(f"Meeting: {entry.meeting_title or 'Untitled'} ({entry.meeting_date.isoformat()})")
+        job = store.load_one(entry.session_id)
+        meeting_when = entry.meeting_date.isoformat()
+        meeting_title = entry.meeting_title
+        if job is not None:
+            meeting_when = f"{meeting_when} {job.meeting_info.start_time.strftime('%H:%M')}"
+            meeting_title = job.meeting_info.title or meeting_title
+        click.echo(f"Meeting: {meeting_title or 'Untitled'} ({meeting_when})")
         click.echo(f"Speaker: {entry.speaker_label}")
-        _play_sample(entry.sample_path)
-        choice = click.prompt("Name, x to remove as noise, or blank to skip", default="", show_default=False)
+        playback = _play_sample(entry.sample_path)
+        try:
+            choice = click.prompt("Name, x to remove as noise, or blank to skip", default="", show_default=False)
+        finally:
+            _stop_sample_playback(playback)
         if not choice:
             continue
         note_updated = False
@@ -524,15 +533,42 @@ def review_run(session_id: str) -> None:
             )
 
 
-def _resolve_review_transcript_path(entry: ReviewEntry, store: JobSnapshotStore, config: AppConfig) -> Path:
+def _resolve_review_transcript_path(
+    entry: ReviewEntry | MeetingReviewEntry,
+    store: JobSnapshotStore,
+    config: AppConfig,
+) -> Path:
     if entry.transcript_path.exists():
         return entry.transcript_path
     job = store.load_one(entry.session_id)
-    if job is None:
-        return entry.transcript_path
-    current_path = output_path_for(job, config)
-    if current_path.exists():
+    current_path = output_path_for(job, config) if job is not None else None
+    if current_path is not None and current_path.exists():
         return current_path
+
+    timestamp_prefix = ""
+    search_directories = [entry.transcript_path.parent]
+    if job is not None:
+        timestamp_prefix = f"{job.meeting_info.start_time:%Y-%m-%d_%H-%M}"
+        if current_path is not None and current_path.parent not in search_directories:
+            search_directories.append(current_path.parent)
+    else:
+        match = re.match(r"^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2})_", entry.transcript_path.name)
+        if match:
+            timestamp_prefix = match.group(1)
+
+    if timestamp_prefix:
+        candidates = getattr(entry, "candidates", [])
+        for directory in search_directories:
+            candidate_matches = {
+                directory / f"{timestamp_prefix}_{slugify(candidate.title)}.md"
+                for candidate in candidates
+                if (directory / f"{timestamp_prefix}_{slugify(candidate.title)}.md").exists()
+            }
+            if len(candidate_matches) == 1:
+                return candidate_matches.pop()
+            timestamp_matches = list(directory.glob(f"{timestamp_prefix}_*.md"))
+            if len(timestamp_matches) == 1:
+                return timestamp_matches[0]
     return entry.transcript_path
 
 
@@ -601,6 +637,8 @@ def review_meetings_list() -> None:
 @review_meetings.command("run")
 @click.option("--session", "session_id", default="")
 def review_meetings_run(session_id: str) -> None:
+    current = AppConfig.load()
+    store = JobSnapshotStore()
     queue = MeetingReviewQueue()
     entries = queue.load()
     if session_id:
@@ -609,7 +647,10 @@ def review_meetings_run(session_id: str) -> None:
         click.echo("No meeting review entries found.")
         return
     for entry in entries:
-        original_transcript_path = entry.transcript_path
+        original_transcript_path = _resolve_review_transcript_path(entry, store, current)
+        if original_transcript_path != entry.transcript_path:
+            _update_meeting_review_entry_paths(queue, entry.session_id, original_transcript_path)
+            entry.transcript_path = original_transcript_path
         click.echo(f"Meeting: {entry.meeting_title or 'Untitled'} ({entry.meeting_date.isoformat()})")
         click.echo(
             f"Detected: app={entry.app or 'unknown'} "
@@ -914,10 +955,24 @@ def _launch_tui() -> None:
         raise click.ClickException(str(exc)) from exc
 
 
-def _play_sample(path: Path) -> None:
+def _play_sample(path: Path) -> subprocess.Popen[bytes] | None:
     player = shutil.which("paplay") or shutil.which("aplay")
     if player:
-        subprocess.run([player, str(path)], check=False)
+        return subprocess.Popen([player, str(path)])
+    return None
+
+
+def _stop_sample_playback(process: subprocess.Popen[bytes] | None) -> None:
+    if process is None or process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    except ProcessLookupError:
+        pass
 
 
 def _refresh_job_summary(store: JobSnapshotStore, config: AppConfig, session_id: str) -> bool:
