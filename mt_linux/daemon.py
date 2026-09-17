@@ -46,6 +46,7 @@ from mt_linux.pipeline.transcript_tracks import (
     relabel_segments,
 )
 from mt_linux.protocol.ollama_generator import OllamaProtocolGenerator
+from mt_linux.protocol.ollama_service import unload_ollama_model
 from mt_linux.protocol.quality import has_substantive_transcript
 from mt_linux.runtime.meeting_sessions import MeetingSessionManager
 from mt_linux.transcription.cleanup import suppress_low_signal_segments
@@ -62,6 +63,14 @@ class MeetingPipeline:
         self._speaker_matcher: SpeakerMatcher | None = None
 
     async def process(self, job: PipelineJob) -> None:
+        try:
+            await self._process_stage(job)
+        finally:
+            # Always release GPU resources, even when a stage fails partway
+            # through the pipeline, so the model is not left loaded in VRAM.
+            self._cleanup_gpu_resources()
+
+    async def _process_stage(self, job: PipelineJob) -> None:
         audio_path = self._processing_audio_path(job)
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file does not exist: {audio_path}")
@@ -134,7 +143,6 @@ class MeetingPipeline:
             keep_audio=self.config.output.keep_audio,
             review_queue=self.review_queue,
         )
-        self._cleanup_gpu_resources()
 
     def _transcribe(self, job: PipelineJob) -> list[TranscriptSegment]:
         job.set_status(JobStatus.TRANSCRIBING, "Transcription started")
@@ -346,18 +354,12 @@ class MeetingPipeline:
         self._clear_cuda_cache()
 
     def _unload_ollama_model(self) -> None:
-        """Ask ollama to unload the currently loaded model from GPU memory."""
-        if not self.config.protocol.enabled:
-            return
-        try:
-            import subprocess
-            subprocess.run(
-                ["ollama", "stop", self.config.model],
-                capture_output=True, timeout=10, check=False,
-            )
-            logging.info("Unloaded ollama model '%s'", self.config.model)
-        except Exception:
-            logging.debug("Failed to unload ollama model (non-fatal)")
+        """Ask ollama to unload the configured model from GPU memory.
+
+        The enabled gate lives in ``_cleanup_gpu_resources`` and the
+        outcome logging in the service function, so this is a thin pass-through.
+        """
+        unload_ollama_model(self.config.protocol.model)
 
     @staticmethod
     def _clear_cuda_cache() -> None:

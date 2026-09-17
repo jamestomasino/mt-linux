@@ -77,6 +77,44 @@ def _ensure_model_available(endpoint: str, model: str) -> None:
         logger.warning("Failed to pull model '%s': %s", model, exc)
 
 
+def normalize_model_name(model: str) -> str:
+    """Return a canonical ollama model name, adding the ``:latest`` tag when missing."""
+    if not model or ":" in model:
+        return model
+    return f"{model}:latest"
+
+
+def unload_ollama_model(model: str) -> bool:
+    """Ask ollama to unload the given model from GPU memory.
+
+    Tries the configured name and common tag variants, because ollama
+    registers models with a tag (e.g. ``llama3.1:latest``) while configs
+    often omit the tag (``llama3.1``).  Returns True if any stop call
+    succeeded (exit code 0), False otherwise.  Non-fatal: callers may
+    log and continue.
+    """
+    if not model:
+        return False
+    candidates = [model]
+    normalized = normalize_model_name(model)
+    if normalized not in candidates:
+        candidates.append(normalized)
+    for name in candidates:
+        try:
+            result = subprocess.run(
+                ["ollama", "stop", name],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode == 0:
+                logger.info("Unloaded ollama model '%s'", name)
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            logger.debug("Failed to unload ollama model '%s' (non-fatal)", name)
+    return False
+
+
 def ensure_ollama_ready(config: ProtocolConfig) -> None:
     """Block until the Ollama endpoint is responsive; launch it if needed."""
     if not config.enabled:
