@@ -153,13 +153,19 @@ def _best_sample_segments(
     diarization_segments: list[DiarizationSegment],
     max_samples: int = 3,
 ):
-    """Pick the longest diarization segments for a speaker, filtering out clips that are too short."""
+    """Pick the best sample clips for a speaker.
+
+    Prefers clips at least ``_MIN_SAMPLE_DURATION`` long so voice matching
+    has enough audio to work with, but falls back to the longest available
+    clip when none qualify.  Without the fallback a speaker whose utterances
+    are all short would be silently dropped: no sample clip means no profile
+    match and no review entry, even though the speaker is still unidentified.
+    """
     diarized = [segment for segment in diarization_segments if segment.speaker == speaker]
-    if diarized:
-        # Sort by duration descending, filter out clips shorter than minimum.
-        good = [s for s in diarized if (s.end - s.start) >= _MIN_SAMPLE_DURATION]
-        return sorted(good, key=lambda item: item.end - item.start, reverse=True)[:max_samples]
-    good = [s for s in transcript_segments if (s.end - s.start) >= _MIN_SAMPLE_DURATION]
+    pool = diarized if diarized else transcript_segments
+    good = [s for s in pool if (s.end - s.start) >= _MIN_SAMPLE_DURATION]
+    if not good:
+        good = pool
     return sorted(good, key=lambda item: item.end - item.start, reverse=True)[:max_samples]
 
 
